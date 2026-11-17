@@ -314,3 +314,51 @@ function tern(x: any) { return true ? x : 42; }
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
+
+// --- Strong evidence not yet recognized: exponentiation / annotated assignment target / spread / logical assignment ---
+
+test('exponentiation infers a numeric operand', () => {
+  const output = inferTs(`
+function pow(x: any) { return x ** 2; }
+`);
+  assert.match(output, /x: number/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('assignment into an annotated target constrains the source', () => {
+  const output = inferTs(`
+function f(x: any) { const n: number = x; return n; }
+`);
+  assert.match(output, /x: number/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('array and call spread targets infer an iterable', () => {
+  const output = inferTs(`
+function spread(x: any) { return [...x]; }
+function invoke(f: Function, args: any) { return f(...args); }
+`);
+  assert.match(output, /x: (unknown\[\]|Iterable<unknown>)/);
+  assert.match(output, /args: (unknown\[\]|Iterable<unknown>)/);
+});
+
+test('logical assignment infers the assigned value type', () => {
+  const output = inferTs(`
+function or(x: any) { x ||= 5; }
+function nn(x: any) { x ??= 'fb'; }
+function and(x: any) { x &&= true; }
+`);
+  assert.match(output, /x: number/);
+  assert.match(output, /x: string/);
+  assert.match(output, /x: boolean/);
+});
+
+test('logical assignment infers the type in JS implicit-any mode', () => {
+  const { output, diagnostics } = convertJs(`
+function probe(x) { x ||= 7; return x; }
+`);
+  assert.match(output, /x: number/);
+  assert.ok(!diagnostics.some((d) => d.includes('TS18046')), diagnostics.join('\n'));
+});

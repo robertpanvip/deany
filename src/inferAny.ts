@@ -382,6 +382,7 @@ function arithmeticNumberType(
     operator === ts.SyntaxKind.PlusToken ||
     operator === ts.SyntaxKind.MinusToken ||
     operator === ts.SyntaxKind.AsteriskToken ||
+    operator === ts.SyntaxKind.AsteriskAsteriskToken ||
     operator === ts.SyntaxKind.SlashToken ||
     operator === ts.SyntaxKind.PercentToken;
   if (!arithmetic) {
@@ -662,6 +663,18 @@ function constraintsFromReference(
     addSource(evidence, typeText(ctx, parent.right));
   }
 
+  // Logical assignment (`x ||= v`, `x &&= v`, `x ??= v`): v is a value the
+  // binding receives, so it is a covariant source, just like `x = v`.
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.left === reference &&
+    (parent.operatorToken.kind === ts.SyntaxKind.BarBarEqualsToken ||
+      parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken ||
+      parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionEqualsToken)
+  ) {
+    addSource(evidence, typeText(ctx, parent.right));
+  }
+
   // A property access on the binding. If it is used as a call (`x.for(1)`),
   // record a callable signature so strict mode does not reject `x.for(...)`;
   // `unknown` would trigger TS18046 ("not callable"). A method signature, once
@@ -735,6 +748,18 @@ function constraintsFromReference(
   // `new Ctor()`: same idea, but the value must be constructable.
   if (ts.isNewExpression(parent) && parent.expression === reference) {
     addConstraint(evidence, 'new (...args: unknown[]) => unknown');
+  }
+
+  // Spreading `[...x]` or `f(...x)` requires x to be iterable. `unknown[]` is
+  // the strict-safe stand-in (same guarantee as for-of), as a contravariant
+  // constraint so a concrete source can still refine it. Object spread
+  // (`{...x}`) is deliberately excluded: spreading accepts any value there.
+  if (
+    ts.isSpreadElement(parent) &&
+    parent.expression === reference &&
+    !ts.isObjectLiteralExpression(parent.parent)
+  ) {
+    addConstraint(evidence, 'unknown[]');
   }
 
   // `x[k]` (read or write) and `for (k in x)` both require x to be an
@@ -835,6 +860,22 @@ function constraintsFromReference(
           evidence.properties.set(key, 'unknown');
         }
       }
+    }
+  }
+
+  // `const n: number = x`: x is assigned into a target with an explicit type
+  // annotation. That annotation is a user-declared contract the value must
+  // satisfy, so it is a strong contravariant constraint on x. Only explicit
+  // annotations count (an inferred `var n = x` carries no independent signal),
+  // and an `any`/`unknown` annotation is disregarded as information-free.
+  if (
+    ts.isVariableDeclaration(parent) &&
+    parent.initializer === reference &&
+    parent.type !== undefined
+  ) {
+    const declared = typeText(ctx, parent.type);
+    if (declared !== undefined && declared !== 'any' && declared !== 'unknown') {
+      addConstraint(evidence, declared);
     }
   }
 

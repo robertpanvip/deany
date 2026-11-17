@@ -65,11 +65,14 @@ node bin/jsdoc2ts.js infer-any app.ts -o app.inferred.ts --check
 | 属性访问集合 | `x.foo` / `x.bar` → 合成 `{ foo: T; bar: U }`（仅当无其他证据时）；方法调用 `x.for(1)` → 成员记为可调用签名 `(...args: unknown[]) => unknown` |
 | 内置 API 的对象槽位 | `Object.defineProperty(x, ...)` / `Reflect.set(x, ...)` 等要求对象的参数 → 逆变约束 `object`（`lib.d.ts` 把这些形参写成 `any`/`T`/`{}` 时也能反推；与更具体的来源共存时以来源为准） |
 | 索引读写与 `for...in` | `x[k]`（读或写）/ `for (k in x)` → 逆变约束 `Record<PropertyKey, unknown>`；`Object(value)` 装箱结果也按此处理。空对象字面量 `{}` 被这样使用时升级为该类型（如 xtend / object-assign 的对象拷贝）；有更具体的来源（如调用点 `number[]`）时以来源为准 |
+| 参数默认值 / 位运算 / 关系比较 / `in` | `f(x = 5)`→`number`；`x\|0`/`~x`→`number`；`x > 10`→`number \| string`；`'k' in x`→`object` |
+| `for...of` / 解构 / `await` / 分支 | `for (v of x)`→`unknown[]`；`{ foo } = x`→对象形状；`await x`→`PromiseLike<unknown>`；`x \|\| fallback`/三元→对侧类型作联合来源 |
+| 幂运算 / 注解目标 / 展开 / 短路赋值 | `x ** 2`→`number`；`const n: number = x`→逆变约束 `number`（仅认显式注解）；`[...x]`/`f(...x)`→`unknown[]`（对象展开 `{...x}` 不推）；`x \|\|= 5`/`x ??= 'fb'`→`number`/`string` |
 
 证据按**方差**分组并按各自规则合并：
 
-- **协变来源**（初始化器、赋值右侧、`return`、算术、`typeof`）：描述「值是什么」。多个不同来源不再视为歧义，而是合并为**联合类型**——既被赋 `number` 又被赋 `string` 的 binding，真实类型就是 `number | string`。字面量会放大（`42` → `number`），嵌套联合展平去重，顺序稳定。
-- **逆变约束**（作为实参传入形参、作为 callee/new 目标、索引/`for...in` 目标）：描述「值必须满足什么」。多个调用点约束取**交集**——同时传给 `f(number|string)` 和 `g(boolean|string)` 的值只能是 `string`。无来源时以约束为准；有来源时约束用于收窄。内置 API 的对象参数（`Object.defineProperty` / `Reflect.*` 等）即使 `lib.d.ts` 写成 `any` / `T` / `{}`，也会登记一条 `object` 约束（这些槽位的 lib 参数类型无信息量，会被跳过以免 `{}` 与 `object` 相交成空集）。`any` / `unknown` / `never` / `{}` 这类无信息约束会被交集忽略；`object` 与 `Record<PropertyKey, unknown>` 同时出现时保留更窄的后者。`Object(value)` 的 `any` 返回值被视为装箱后的可索引对象。
+- **协变来源**（初始化器、赋值右侧、短路赋值右侧、`return`、算术含 `**`、`typeof`、分支对侧值）：描述「值是什么」。多个不同来源不再视为歧义，而是合并为**联合类型**——既被赋 `number` 又被赋 `string` 的 binding，真实类型就是 `number | string`。字面量会放大（`42` → `number`），嵌套联合展平去重，顺序稳定。
+- **逆变约束**（作为实参传入形参、作为 callee/new 目标、索引/`for...in`/`for...of`/展开目标、赋给带显式注解的变量、`await` 操作数）：描述「值必须满足什么」。多个调用点约束取**交集**——同时传给 `f(number|string)` 和 `g(boolean|string)` 的值只能是 `string`。无来源时以约束为准；有来源时约束用于收窄。内置 API 的对象参数（`Object.defineProperty` / `Reflect.*` 等）即使 `lib.d.ts` 写成 `any` / `T` / `{}`，也会登记一条 `object` 约束（这些槽位的 lib 参数类型无信息量，会被跳过以免 `{}` 与 `object` 相交成空集）。`any` / `unknown` / `never` / `{}` 这类无信息约束会被交集忽略；`object` 与 `Record<PropertyKey, unknown>` 同时出现时保留更窄的后者。`Object(value)` 的 `any` 返回值被视为装箱后的可索引对象。
 - **属性形状**是最后手段，仅当上面两类都没有证据时才用来合成对象类型，避免 `arr.push` 之类 incidental 访问污染数组推断。方法调用 `x.for(1)` 会记录为可调用成员 `(...args: unknown[]) => unknown`（而非 `unknown`——后者在 strict 下不可调用，会触发 TS18046）；方法签名一旦确立就不会被后续的普通属性读取降级。
 
 联合类型成员会按需加括号（函数成员、嵌套位置）以保证严格语法正确。只有完全没有任何证据时才保留 `any` 并报告 `no usage evidence`。
@@ -261,7 +264,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 113 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、typeof function 合法化、catch 变量注解规避、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
+npm test            # 127 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、默认值/位运算/比较/in、for-of/解构/await/分支、幂运算/注解目标/展开/短路赋值、typeof function 合法化、catch 变量注解规避、弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
@@ -300,6 +303,11 @@ npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
 - 内置 API 的对象参数槽位（`Object.defineProperty` / `Reflect.*` 等）即使 `lib.d.ts` 把形参写成 `any`/`T`/`{}` 也能反推出 `object` 约束（见上文「证据来源」）。
 - 变量作为 callee 被调用（`fn(...)`）或 `new Ctor()` 时，即使在嵌套回调里，也会反推出可调用 / 可构造签名，而不是留在 `unknown`（消除 `TS18046`，如 p-try）；下游若有更具体的 call-site 签名则以具体值为准。
 - `x[k]` / `for (k in x)` 目标与 `Object(value)` 装箱结果反推出 `Record<PropertyKey, unknown>`，空对象字面量 `{}` 被这样使用时升级为该类型（消除 `TS2407`/`TS7053`，xtend 清零、object-assign 从 10 个错误降到 1 个）。装箱原始类型（`new String(...)`）不可赋给 `Record`，保留其具体类型而不臆造 `any`。
+
+第四轮按「只认运行时强制 / 语法必然 / 用户显式声明」的原则补强证据（不做"看起来像"的臆测——曾尝试的方法簇反推已据此回退）：
+- 参数默认值、位运算（`| & ^ << >> >>> ~`）、关系比较（`< > <= >=` → `number | string`）、`'k' in x` → `object`。
+- `for...of` / 数组解构目标 → `unknown[]`；对象解构 → 对象形状；`await x` → `PromiseLike<unknown>`；`x || fallback` / 三元 → 对侧类型作联合来源。
+- 幂运算 `x ** 2` → `number`（补齐算术白名单）；`const n: number = x` 的**显式**注解 → 逆变约束 `number`（无注解或 `any`/`unknown` 不算，与具体来源冲突时来源胜出）；`[...x]` / `f(...x)` → `unknown[]`（对象展开 `{...x}` 不推）；短路赋值 `x ||= 5` / `x ??= 'fb'` → `number` / `string`。
 
 仍存在的局限（属于"JS 动态模式 → strict TS"的固有难度，非语法 bug）：
 
