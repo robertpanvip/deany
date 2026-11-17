@@ -341,3 +341,77 @@ test('back-propagates typeof narrowing across file boundaries', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('infers an any parameter from Array.isArray narrowing', () => {
+  const { output } = infer(`
+function handle(x: any) {
+  if (Array.isArray(x)) return x.length;
+}
+`);
+  assert.match(output, /function handle\(x: unknown\[\]\)/);
+});
+
+test('back-propagates an Array.isArray parameter type to the call site', () => {
+  const { output } = infer(`
+function handle(x: any) {
+  if (Array.isArray(x)) return x.length;
+}
+let value: any;
+handle(value);
+`);
+  assert.match(output, /let value: unknown\[\];/);
+});
+
+test('infers an any parameter from instanceof narrowing (local class)', () => {
+  const { output } = infer(`
+class Box { value = 1; }
+function handle(x: any) {
+  if (x instanceof Box) return x.value;
+}
+`);
+  assert.match(output, /function handle\(x: Box\)/);
+});
+
+test('infers an any parameter from instanceof narrowing (built-in)', () => {
+  const { output } = infer(`
+function handle(x: any) {
+  if (x instanceof Date) return x.getTime();
+}
+`);
+  assert.match(output, /function handle\(x: Date\)/);
+});
+
+test('unions typeof and instanceof narrowing into a parameter union', () => {
+  const { output } = infer(`
+class Box { v = 1; }
+function handle(x: any) {
+  if (typeof x === 'string') return 1;
+  if (x instanceof Box) return x.v;
+}
+`);
+  assert.match(output, /function handle\(x: \(Box \| string\)\)/);
+});
+
+test('unions Array.isArray and instanceof narrowing into a parameter union', () => {
+  const { output } = infer(`
+class Box { v = 1; }
+function handle(x: any) {
+  if (Array.isArray(x)) return x.length;
+  if (x instanceof Box) return x.v;
+}
+`);
+  assert.match(output, /function handle\(x: \(Box \| unknown\[\]\)\)/);
+});
+
+test('back-propagates an instanceof parameter type through a chained variable', () => {
+  const { output } = infer(`
+class Box { v = 1; }
+function handle(x: any) {
+  if (x instanceof Box) return x.v;
+}
+let value: any;
+handle(value);
+let copy: any = value;
+`);
+  assert.match(output, /let copy: Box = value;/);
+});

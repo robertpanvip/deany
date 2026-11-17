@@ -95,7 +95,17 @@ format(value);                                  // value → number | string（�
 let copy: any = value;                          // copy → number | string（继续链式传播）
 ```
 
-若调用点实参本身有更直接的证据（如初始化器），以该证据为准；约束仅在其缺失时用于推断。函数体没有 `typeof` 等收窄信息时，参数不会被臆测为具体类型。
+`Array.isArray(x)` 与 `x instanceof Ctor` 也是标准的类型守卫，按同样方式作为协变来源并反推到调用点：`isArray` 推断为 `unknown[]`（元素类型无可靠证据时不臆造），`instanceof` 推断为构造器的实例类型（本地类、内置类、import 的类均可）。多种守卫并存时合并为联合：
+
+```ts
+class Box { v = 1; }
+function handle(x: any) {              // x → Box | unknown[]
+  if (Array.isArray(x)) return x.length;
+  if (x instanceof Box) return x.v;
+}
+```
+
+若调用点实参本身有更直接的证据（如初始化器），以该证据为准；约束仅在其缺失时用于推断。函数体没有任何收窄信息（`typeof` / `isArray` / `instanceof`）时，参数不会被臆测为具体类型。
 
 `infer-any` 与 JS 隐式 any 反推（`createUsageResolver`）共用这套迭代引擎。推断结果只增不改（一旦确定就固定），最多 16 轮，实测大型项目（lodash 单文件 579KB / async 102 文件）均在 1 秒内完成。
 
@@ -238,7 +248,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 70 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof 收窄反推、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、回调参数与真实项目回归）
+npm test            # 77 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check

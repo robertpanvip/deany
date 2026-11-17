@@ -464,6 +464,41 @@ function addConstraint(evidence: Evidence, type: string | undefined): void {
   }
 }
 
+/**
+ * `Array.isArray(x)` is a type guard narrowing `x` to an array. Recognize the
+ * call by its callee text so it can be a covariant source for the binding.
+ */
+function isArrayIsArrayCall(call: ts.CallExpression): boolean {
+  return (
+    ts.isPropertyAccessExpression(call.expression) &&
+    call.expression.expression.getText(call.getSourceFile()) === 'Array' &&
+    call.expression.name.text === 'isArray'
+  );
+}
+
+/**
+ * Instance type produced by `x instanceof Ctor`, or undefined if the right
+ * operand has no usable class/function symbol (e.g. a complex expression).
+ */
+function instanceTypeOf(
+  ctx: InferenceContext,
+  right: ts.Expression,
+): string | undefined {
+  let symbol = ctx.checker.getSymbolAtLocation(right);
+  if (symbol === undefined) {
+    return undefined;
+  }
+  if ((symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+    const resolved = ctx.checker.getAliasedSymbol(symbol);
+    if (resolved !== undefined) {
+      symbol = resolved;
+    }
+  }
+  const declared = ctx.checker.getDeclaredTypeOfSymbol(symbol);
+  const text = ctx.checker.typeToString(declared, right, TYPE_FORMAT).trim();
+  return text.length === 0 || text === 'any' || text === 'unknown' ? undefined : text;
+}
+
 /** Extract constraints from one reference to the `any`-typed binding. */
 function constraintsFromReference(
   reference: ts.Identifier,
@@ -496,13 +531,12 @@ function constraintsFromReference(
     addSource(evidence, typeText(ctx, parent.parent.right));
   }
 
-  // A binding passed as an argument must be assignable to the parameter type.
-  // This is a contravariant constraint; multiple such constraints intersect.
-  // If the parameter itself was `any` and inferred from its body (e.g. via
-  // `typeof` narrowing), prefer that inferred type — it lives in the
-  // `declarations` table keyed by the parameter node. `symbolTypeText` alone
-  // would see the raw `any` and route to the callee's *return* table instead.
-  if (ts.isCallExpression(parent)) {
+  // `Array.isArray(x)` narrows x to an array. This is a covariant source for
+  // the binding, not a normal call-argument constraint. `unknown[]` is used so
+  // strict mode stays intact without inventing an element type.
+  if (ts.isCallExpression(parent) && parent.arguments[0] === reference && isArrayIsArrayCall(parent)) {
+    addSource(evidence, 'unknown[]');
+  } else if (ts.isCallExpression(parent)) {
     const index = parent.arguments.indexOf(reference);
     if (index >= 0) {
       const signature = ctx.checker.getResolvedSignature(parent);
@@ -514,6 +548,15 @@ function constraintsFromReference(
         addConstraint(evidence, inferred ?? symbolTypeText(ctx, parameter, parent));
       }
     }
+  }
+
+  // `x instanceof Ctor` narrows x to the constructor's instance type.
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.left === reference &&
+    parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword
+  ) {
+    addSource(evidence, instanceTypeOf(ctx, parent.right));
   }
 
   if (
