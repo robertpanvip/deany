@@ -189,6 +189,39 @@ test('projects a generic slot such as Map<string, any>', () => {
   assert.match(output, /const m: Map<string, number>/);
 });
 
+test('unions element types written via push/unshift into an any[] slot', () => {
+  const { output } = infer(`const a: any[] = [1]; a.push('x'); a.unshift(true);\n`);
+  assert.match(output, /const a: \(boolean \| number \| string\)\[\]/);
+  assert.doesNotMatch(output, /const a: number\[\]/);
+});
+
+test('unions element types written via index assignment into an any[] slot', () => {
+  const { output } = infer(`const a: any[] = [1]; a[1] = 'x';\n`);
+  assert.match(output, /const a: \(number \| string\)\[\]/);
+});
+
+test('infers an empty any[] from push mutations instead of keeping any', () => {
+  const { output } = infer(`const a: any[] = []; a.push('x');\n`);
+  assert.match(output, /const a: string\[\]/);
+});
+
+test('infers a Map value slot from set(key, value) mutations', () => {
+  const { output } = infer(`const m: Map<string, any> = new Map(); m.set('a', 42); m.set('b', 'x');\n`);
+  assert.match(output, /const m: Map<string, \(number \| string\)>/);
+  assert.doesNotMatch(output, /\bany\b/);
+});
+
+test('infers a Set element slot from add(value) mutations', () => {
+  const { output } = infer(`const s: Set<any> = new Set(); s.add(1); s.add('x');\n`);
+  assert.match(output, /const s: Set<\(number \| string\)>/);
+  assert.doesNotMatch(output, /\bany\b/);
+});
+
+test('does not treat read-only container accesses as element evidence', () => {
+  const { output } = infer(`const a: any[] = [1]; console.log(a.length, a.map);\n`);
+  assert.match(output, /const a: number\[\]/);
+});
+
 test('nested any annotation still infers the whole type when not nested', () => {
   const { output } = infer(`let x: any = [1, 2];\n`);
   assert.match(output, /let x: Array<number> = \[1, 2\];/);

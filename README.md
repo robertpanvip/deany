@@ -94,6 +94,18 @@ const m: Map<string, any> = new Map<string, number>(); // → Map<string, number
 const e: any[] = [];                        // → 保留 any[]（空数组无元素证据，不推断成危险的 never[]）
 ```
 
+**容器变异推断**：往容器槽位里写值的方法调用，是元素/值类型的协变来源，会与初始化器等证据合并为联合；而 `.length` / `.map` 这类只读访问仍当噪音排除。这样推断出的元素类型不会窄到让写入操作报错：
+
+```ts
+const a: any[] = [1]; a.push('x');                        // → (number | string)[]（不是 number[]，避免 push 报 TS2345）
+const a2: any[] = [1]; a2[1] = 'x';                       // → (number | string)[]
+const e: any[] = []; e.push('x');                         // → string[]（空数组有写入证据时不再保留 any）
+const m: Map<string, any> = new Map(); m.set('a', 42); m.set('b', 'x'); // → Map<string, number | string>
+const s: Set<any> = new Set(); s.add(1); s.add('x');      // → Set<number | string>
+```
+
+这里选**联合类型**而非元组：`push`/`set`/`add` 是运行时动态追加，元组（固定长度与位置）无法容纳后续写入，联合才是与 TypeScript 原生推断一致、且对 ScriptC 友好的表示。
+
 不嵌套的 `any` 仍按整个类型推断（`let x: any = [1,2]` → `Array<number>`）；函数返回类型 `Promise<any>` + `return 1` → `Promise<number>`，均不受影响。
 
 ```text
@@ -212,7 +224,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 57 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、嵌套 any 槽位投影、方差感知的联合/交集推断、回调参数与真实项目回归）
+npm test            # 63 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check

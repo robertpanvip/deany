@@ -536,6 +536,95 @@ function constraintsFromReference(
   }
 }
 
+type MutationKind = 'collection' | 'map' | 'set';
+
+/**
+ * When an `any` occupies the mutable element/value slot of a container type
+ * (`any[]`, `Array<any>`, `Map<K, any>`, `Set<any>`), mutations through that
+ * binding are additional covariant sources for the slot type. Read-only
+ * accesses (`a.length`, `a.map`) remain noise and are never used.
+ */
+function mutationKindOf(anyNode: ts.Node): MutationKind | undefined {
+  const parent = anyNode.parent;
+  if (ts.isArrayTypeNode(parent) && parent.elementType === anyNode) {
+    return 'collection';
+  }
+  if (ts.isTypeReferenceNode(parent) && parent.typeArguments !== undefined) {
+    const name = parent.typeName.getText();
+    const index = parent.typeArguments.indexOf(anyNode as ts.TypeNode);
+    if (index < 0) {
+      return undefined;
+    }
+    if (name === 'Array' || name === 'ReadonlyArray') {
+      return 'collection';
+    }
+    if ((name === 'Map' || name === 'ReadonlyMap' || name === 'WeakMap') && index === 1) {
+      return 'map';
+    }
+    if ((name === 'Set' || name === 'ReadonlySet' || name === 'WeakSet') && index === 0) {
+      return 'set';
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Collect element/value types written into a container through its binding:
+ * `push`/`unshift` and index assignment for arrays, `set(k, v)` for maps,
+ * `add(v)` for sets. These are covariant sources for the `any` slot.
+ */
+function collectMutationEvidence(
+  owner: ts.Node,
+  kind: MutationKind,
+  ctx: InferenceContext,
+): string[] {
+  const symbol = symbolOf(owner, ctx.checker);
+  if (symbol === undefined) {
+    return [];
+  }
+  const collected: string[] = [];
+  const add = (node: ts.Expression | undefined): void => {
+    const text = node === undefined ? undefined : typeText(ctx, node);
+    if (text !== undefined) {
+      collected.push(text);
+    }
+  };
+  for (const ref of referencesOf(symbol, ctx)) {
+    const parent = ref.parent;
+    if (ts.isPropertyAccessExpression(parent) && parent.expression === ref) {
+      const call = parent.parent;
+      if (ts.isCallExpression(call) && call.expression === parent) {
+        const method = parent.name.text;
+        if (kind === 'collection' && (method === 'push' || method === 'unshift')) {
+          for (const argument of call.arguments) {
+            add(argument);
+          }
+        } else if (kind === 'map' && method === 'set') {
+          add(call.arguments[1]);
+        } else if (kind === 'set' && method === 'add') {
+          add(call.arguments[0]);
+        }
+      }
+    }
+    // `a[i] = v`: the reference is the element-access base.
+    if (
+      kind === 'collection' &&
+      ts.isElementAccessExpression(parent) &&
+      parent.expression === ref
+    ) {
+      const binary = parent.parent;
+      if (
+        ts.isBinaryExpression(binary) &&
+        binary.left === parent &&
+        binary.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      ) {
+        add(binary.right);
+      }
+    }
+  }
+  return collected;
+}
+
 /** Collect type evidence for the declaration that owns an `any` annotation. */
 function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
   const evidence = emptyEvidence();
@@ -711,6 +800,32 @@ function mergeEvidence(evidence: Evidence): { type?: string; reason?: string } {
   return { type: formatted.join(' | ') };
 }
 
+/**
+ * Combine a projected whole-value type with element/value types written through
+ * a mutable container into one union for the `any` slot. Flattens nested unions,
+ * de-duplicates and sorts for deterministic output. Returns undefined only when
+ * there is no evidence at all.
+ */
+function mergeMutationEvidence(
+  projected: string | undefined,
+  mutations: readonly string[],
+): string | undefined {
+  // `any`/`unknown` carry no information and, worse, `any | T` collapses to
+  // `any` in TypeScript. Drop them so concrete mutations can win.
+  const informative = (value: string | undefined): boolean =>
+    value !== undefined && value !== 'any' && value !== 'unknown';
+  const all = [...(informative(projected) ? [projected as string] : []), ...mutations];
+  if (all.length === 0) {
+    return undefined;
+  }
+  const members = [...new Set(all.flatMap(splitTopLevelUnion))].sort();
+  if (members.length === 1) {
+    return members[0];
+  }
+  const formatted = members.map((member) => (hasTopLevelArrow(member) ? `(${member})` : member));
+  return formatted.join(' | ');
+}
+
 /** All declarations that carry an `any` annotation, across non-declaration files. */
 function collectAnyOwners(program: ts.Program): ts.Node[] {
   const owners = new Set<ts.Node>();
@@ -841,7 +956,15 @@ export function inferAnyInProject(
           // onto the position this `any` token actually occupies so nested
           // slots (`any[]`, `Array<any>`, `Map<K, any>`) are not double-wrapped.
           const projected = wholeType === undefined ? undefined : projectSlotType(wholeType, slotPathOf(node));
-          const usable = projected !== 'never' ? projected : undefined;
+          const usableProjected = projected !== 'never' ? projected : undefined;
+          // For a mutable container slot, method calls that write into it
+          // (`push`, `set`, `add`, index assignment) are covariant sources for
+          // the slot type and must be unioned with the projected whole value.
+          // Read-only accesses stay out as noise.
+          const mutationKind = mutationKindOf(node);
+          const mutationTypes =
+            mutationKind === undefined ? [] : collectMutationEvidence(owner, mutationKind, ctx);
+          const usable = mergeMutationEvidence(usableProjected, mutationTypes);
           if (usable !== undefined) {
             edits.push({
               start: node.getStart(sourceFile),
