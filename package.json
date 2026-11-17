@@ -1,0 +1,46 @@
+{
+  "name": "jsdoc2strict-ts",
+  "version": "0.1.0",
+  "description": "Convert JSDoc-annotated JavaScript into strict TypeScript that is ready for scriptc / tsc --strict.",
+  "type": "module",
+  "bin": {
+    "jsdoc2ts": "./bin/jsdoc2ts.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "demo": "npm run build && node bin/jsdoc2ts.js examples/input.js -o examples/output.ts --check",
+    "infer-demo": "npm run build && node bin/jsdoc2ts.js infer-any examples/any-input.ts -o examples/any-output.ts --check",
+    "js-infer-demo": "npm run build && node bin/jsdoc2ts.js examples/js-infer-input.js -o examples/js-infer-output.ts --check"
+  },
+  "keywords": [
+    "jsdoc",
+    "typescript",
+    "strict",
+    "scriptc",
+    "js-to-ts"
+  ],
+  "license": "Apache-2.0",
+  "peerDependencies": {
+    "typescript": ">=5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0"
+  }
+}
