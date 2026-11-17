@@ -259,7 +259,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 87 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、回调参数与真实项目回归）
+npm test            # 91 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
@@ -284,9 +284,17 @@ npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
 - JSDoc 引用了但本文件未定义的自定义类型名，会生成 `type X = unknown;` 兜底别名并给出警告（消除 `TS2304`，名字保留供后续补全）；`@template` 泛型参数不会误加别名。
 - 缺少上下文类型的回调参数自动补 `unknown`（消除绝大多数 `TS7006`），有上下文的回调不动；实测 lodash 的 239 处隐式 any 参数全部清零。
 
+随后又用 8 个小型常见库（ms / is-number / fast-deep-equal / p-limit / chalk / debug / semver / nanoid）做了第二轮验证，据此修复：
+
+- JSDoc 的大写内建类型 `String` / `Number` / `Boolean` / `Integer` / `Float` 归一化成 TS primitive（消除包装对象类型导致的 `TS2345` / `TS2362`；如 `parse(str: String): Number` → `parse(str: string): number`）。
+- `module.exports = function(){}` / `exports.foo = fn` 这类赋值型函数表达式能正确关联上方 JSDoc（此前 `@param` / `@returns` 全部丢失，参数退化为属性形状推断）。
+- 变量初始化器为函数时，不再同时给绑定加一份来自 checker 的函数类型注解（此前与函数本身的注解各写一份、归一化不同，触发 `TS2322` / `TS2355`）；改为只标注函数，由 TS 推导绑定类型。
+- `instanceof` 推断泛型类（`Map` / `Set` 等）时用实例化后的类型，并把悬空类型参数与 `any` 槽位归一为 `unknown`（`Set<T>` → `Set<unknown>`，消除 `TS2304`）。
+
 仍存在的局限（属于"JS 动态模式 → strict TS"的固有难度，非语法 bug）：
 
-- `unknown` 参与运算/索引/赋值会触发 `TS18046/TS2345/TS2322`；函数内 `this` 触发 `TS2683`。这些需按具体业务补类型或用 `infer-any` 进一步收窄。
+- `unknown` 参与运算/索引/赋值会触发 `TS18046/TS2345/TS2322`；函数内 `this` 触发 `TS2683`。这些需按具体业务补类型或用 `infer-any` 进一步收窄。例如 p-limit 里 `require('yocto-queue')` 的结果、`typeof` 收窄存进变量（`var type = typeof val`）后无法跨变量收窄，都会留下 `unknown`。
+- 递归函数（如 fast-deep-equal 的 `equal(a, b)`）的参数若被推断为较窄的联合/对象类型，递归调用把联合成员（`Map` 的值 `unknown`）再传回参数时会触发 `TS2345`——类型推断无法预知递归数据流，属固有限制。
 - 回调参数的上游若已是 `any` / `unknown`（如 `anyArray.map(x => ...)`），其上下文类型为 `any`，此时回调参数保持原样——标注它无法修复上游已丢失的类型，属于 unknown 传播问题。
 - 跨文件推断把自定义类型（如 `Mixed`）传播到使用点时，使用点文件可能缺少对应兜底别名（该类型只定义在别的文件 JSDoc 中）。
 - `window` / `document` / `define` 等运行时全局依赖目标 lib / 环境声明，不由转换器兜底。

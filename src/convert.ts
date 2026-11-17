@@ -472,6 +472,21 @@ export function convertSource(
     if (doc?.tags.some((tag) => tag.tag === 'param' || tag.tag === 'returns' || tag.tag === 'return') ?? false) {
       return;
     }
+    // Likewise, when the initializer is itself a function and the type came
+    // from inference (not an explicit @type), the function expression carries
+    // its own parameter/return annotations. Adding a separate binding
+    // annotation from the checker's function type (which may contain `any`)
+    // duplicates the type in two places with different normalizations and
+    // produces assignability errors. Let TS infer the binding from the
+    // annotated function instead.
+    const hasExplicitTypeTag = doc?.tags.some((tag) => tag.tag === 'type') ?? false;
+    if (
+      !hasExplicitTypeTag &&
+      node.initializer !== undefined &&
+      isFunctionLike(node.initializer)
+    ) {
+      return;
+    }
     edits.add(node.name.end, `: ${type}`);
   };
 
@@ -522,7 +537,21 @@ export function convertSource(
   const visit = (node: ts.Node): void => {
     if (isFunctionLike(node) && !processed.has(node)) {
       processed.add(node);
-      const doc = leadingJsDoc(node, sourceFile, source, blocks);
+      let doc = leadingJsDoc(node, sourceFile, source, blocks);
+      if (doc === undefined) {
+        // `module.exports = function(){}` / `exports.foo = fn` / `x = fn`:
+        // the JSDoc is attached to the enclosing assignment, whose start
+        // position equals the binary expression's, not to the function
+        // expression itself (there is non-whitespace text in between).
+        const parent = node.parent;
+        if (
+          ts.isBinaryExpression(parent) &&
+          parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          parent.right === node
+        ) {
+          doc = leadingJsDoc(parent, sourceFile, source, blocks);
+        }
+      }
       if (doc !== undefined || !isCallbackArgument(node)) {
         processFunction(node, doc);
       } else if (options.annotateUntypedCallbacks) {

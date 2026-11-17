@@ -182,6 +182,23 @@ export function normalizeJsDocType(raw: string, options: ConvertOptions): string
   if (type === 'Symbol') {
     return 'symbol';
   }
+  // JSDoc/Closure spell primitives with capitalized names (`String`, `Number`,
+  // `Boolean`, `Integer`, `Float`). In TypeScript those spellings are boxed
+  // wrapper objects — using them breaks arithmetic, `Math.*` calls and
+  // assignability against literals. Map exact matches to primitive keywords.
+  // Generic usages (e.g. `Array<String>`) are handled recursively by the
+  // generic branch below, so they normalize here too.
+  const primitiveAliases: Record<string, string> = {
+    String: 'string',
+    Number: 'number',
+    Boolean: 'boolean',
+    Integer: 'number',
+    Float: 'number',
+  };
+  const primitive = primitiveAliases[type];
+  if (primitive !== undefined) {
+    return primitive;
+  }
 
   const arrayArgs = genericArguments(type, 'Array');
   if (

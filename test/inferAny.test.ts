@@ -499,3 +499,21 @@ function format(x: any) { return x.toFixed(2); }
 `);
   assert.match(output, /function format\(x: \{ toFixed: \(\.\.\.args: unknown\[\]\) => unknown; \}\)/);
 });
+
+test('instantiates generic classes inferred via instanceof with unknown', () => {
+  const { output } = infer(`
+function isEmpty(x: any) {
+  if (x instanceof Map) return x.size === 0;
+  if (x instanceof Set) return x.size === 0;
+  return false;
+}
+let value: any;
+isEmpty(value);
+`);
+  // Generic type arguments must be instantiated with `unknown`, never leak the
+  // uninstantiated `K`/`V`/`T` from lib.d.ts (which caused TS2304).
+  assert.match(output, /Map<unknown, unknown>/);
+  assert.match(output, /Set<unknown>/);
+  assert.doesNotMatch(output, /<K|Set<T>|Map<K/);
+  assert.match(output, /let value:/);
+});

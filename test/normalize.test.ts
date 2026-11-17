@@ -72,3 +72,15 @@ test('bare generics get type arguments to stay strict-safe', () => {
   assert.equal(normalizeJsDocType('Map', DEFAULT_OPTIONS), 'Map<unknown, unknown>');
   assert.equal(normalizeJsDocType('Set', DEFAULT_OPTIONS), 'Set<unknown>');
 });
+
+test('capitalized JSDoc primitive names normalize to TS keywords', () => {
+  assert.equal(normalizeJsDocType('String', DEFAULT_OPTIONS), 'string');
+  assert.equal(normalizeJsDocType('Number', DEFAULT_OPTIONS), 'number');
+  assert.equal(normalizeJsDocType('Boolean', DEFAULT_OPTIONS), 'boolean');
+  assert.equal(normalizeJsDocType('Integer', DEFAULT_OPTIONS), 'number');
+  assert.equal(normalizeJsDocType('Float', DEFAULT_OPTIONS), 'number');
+  assert.equal(normalizeJsDocType('String|Number', DEFAULT_OPTIONS), 'string | number');
+  // Nested in a generic: each argument is normalized recursively.
+  assert.equal(normalizeJsDocType('Array.<String>', DEFAULT_OPTIONS), 'Array<string>');
+  assert.equal(normalizeJsDocType('Promise.<Number>', DEFAULT_OPTIONS), 'Promise<number>');
+});

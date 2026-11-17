@@ -482,6 +482,28 @@ function isArrayIsArrayCall(call: ts.CallExpression): boolean {
  * Instance type produced by `x instanceof Ctor`, or undefined if the right
  * operand has no usable class/function symbol (e.g. a complex expression).
  */
+/**
+ * For `x instanceof Ctor`, checker's declared type of a generic class leaks
+ * uninstantiated type parameters (`Map<K, V>`, `Set<T>`) which produce TS2304
+ * when written back. Prefer the construct signature's return type (already
+ * instantiated, e.g. `Map<any, any>`), then normalize both `any` slots and any
+ * remaining bare single-letter parameters to `unknown` — the element type is
+ * genuinely unknown from an instanceof check alone.
+ */
+function sanitizeInstanceType(text: string): string {
+  let result = text;
+  result = result.replace(/<([A-Z](?:\s*,\s*[A-Z])*)>/g, (_m, inner: string) => {
+    const args = inner.split(',').map((part) => part.trim());
+    return args.every((part) => /^[A-Z]$/.test(part))
+      ? `<${args.map(() => 'unknown').join(', ')}>`
+      : _m;
+  });
+  // `Map<any, any>` from a construct signature: an `any` slot from instanceof
+  // carries no real information, so use `unknown` to keep strict soundness.
+  result = result.replace(/\bany\b/g, 'unknown');
+  return result;
+}
+
 function instanceTypeOf(
   ctx: InferenceContext,
   right: ts.Expression,
@@ -496,8 +518,14 @@ function instanceTypeOf(
       symbol = resolved;
     }
   }
-  const declared = ctx.checker.getDeclaredTypeOfSymbol(symbol);
-  const text = ctx.checker.typeToString(declared, right, TYPE_FORMAT).trim();
+  // Prefer the instantiated instance type from the construct signature.
+  const rightType = ctx.checker.getTypeAtLocation(right);
+  const constructReturn = rightType.getConstructSignatures()[0]?.getReturnType();
+  const instance = constructReturn ?? (symbol === undefined ? undefined : ctx.checker.getDeclaredTypeOfSymbol(symbol));
+  if (instance === undefined) {
+    return undefined;
+  }
+  const text = sanitizeInstanceType(ctx.checker.typeToString(instance, right, TYPE_FORMAT).trim());
   return text.length === 0 || text === 'any' || text === 'unknown' ? undefined : text;
 }
 

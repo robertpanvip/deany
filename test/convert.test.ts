@@ -183,3 +183,26 @@ test('generated tsconfig is strict and scriptc friendly', () => {
   assert.equal(parsed.compilerOptions['verbatimModuleSyntax'], true);
   assert.equal(parsed.compilerOptions['noImplicitAny'], true);
 });
+
+test('attaches JSDoc to an exported function expression (module.exports = fn)', () => {
+  const source = `
+/**
+ * @param {String|Number} val
+ * @param {Object} [options]
+ * @returns {String}
+ */
+module.exports = function format(val, options) { return String(val); };
+`;
+  const { output } = convertSource('index.js', source, { banner: false });
+  assert.match(output, /module\.exports = function format\(val: (?:string \| number|number \| string), options\?: Record<string, unknown>\): string/);
+  assert.doesNotMatch(output, /val: \{/);
+});
+
+test('does not double-annotate a variable initialized by a function', () => {
+  const source = `const handler = (value) => value + 1;\n`;
+  const { output } = convertSource('a.js', source, { banner: false });
+  // The binding must not get a checker-derived function annotation that could
+  // disagree with the parameter annotations on the arrow itself.
+  assert.doesNotMatch(output, /const handler: \(/);
+  assert.match(output, /\(value: unknown\)/);
+});
