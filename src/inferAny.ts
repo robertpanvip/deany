@@ -328,6 +328,30 @@ function resolveViaTable(ctx: InferenceContext, node: ts.Node): string | undefin
   return undefined;
 }
 
+/**
+ * `Object(value)` boxes its argument into an object (primitives become their
+ * wrapper objects); lib.d.ts types the return as `any`, which carries no
+ * information. Recognize only the genuine global constructor — the symbol's
+ * declarations must all live in a declaration file — so a user shadowing
+ * `Object` is never mistaken for it.
+ */
+function objectConstructorResult(ctx: InferenceContext, node: ts.Node): string | undefined {
+  if (!ts.isCallExpression(node) || !ts.isIdentifier(node.expression)) {
+    return undefined;
+  }
+  if (node.expression.text !== 'Object') {
+    return undefined;
+  }
+  const declarations = ctx.checker.getSymbolAtLocation(node.expression)?.declarations;
+  if (declarations === undefined || declarations.length === 0) {
+    return undefined;
+  }
+  if (!declarations.every((d) => d.getSourceFile().isDeclarationFile)) {
+    return undefined;
+  }
+  return INDEXABLE_OBJECT;
+}
+
 function typeText(
   ctx: InferenceContext,
   node: ts.Node,
@@ -336,7 +360,7 @@ function typeText(
   const raw = type ?? ctx.checker.getTypeAtLocation(node);
   const widened = ctx.checker.getWidenedType(raw);
   if (widened.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) {
-    return resolveViaTable(ctx, node);
+    return objectConstructorResult(ctx, node) ?? resolveViaTable(ctx, node);
   }
   const text = widenedTypeText(ctx.checker, widened, node);
   if (text.length === 0 || text === 'any' || text === 'unknown') {
@@ -491,6 +515,13 @@ function typeofLiteralToType(literal: string): string {
   }
   return literal;
 }
+
+/**
+ * Minimal strict-safe contract for a value indexed by arbitrary keys. Using
+ * `PropertyKey` covers string, number and symbol keys, so the same type works
+ * for `x[k]`, `x[symbol]` and `for (k in x)` without inventing a value type.
+ */
+const INDEXABLE_OBJECT = 'Record<PropertyKey, unknown>';
 
 /**
  * Built-in APIs whose parameter slots semantically require an object even
@@ -686,6 +717,20 @@ function constraintsFromReference(
   // `new Ctor()`: same idea, but the value must be constructable.
   if (ts.isNewExpression(parent) && parent.expression === reference) {
     addConstraint(evidence, 'new (...args: unknown[]) => unknown');
+  }
+
+  // `x[k]` (read or write) and `for (k in x)` both require x to be an
+  // indexable object. Record over PropertyKey is a contravariant constraint:
+  // the binding must be indexable by arbitrary keys, but a more specific
+  // covariant source (e.g. `number[]` from a call site) can still override it.
+  if (
+    ts.isElementAccessExpression(parent) &&
+    parent.expression === reference
+  ) {
+    addConstraint(evidence, INDEXABLE_OBJECT);
+  }
+  if (ts.isForInStatement(parent) && parent.expression === reference) {
+    addConstraint(evidence, INDEXABLE_OBJECT);
   }
 
   // `x instanceof Ctor` narrows x to the constructor's instance type.
@@ -920,11 +965,23 @@ function splitTopLevelUnion(type: string): string[] {
 
 /** Set intersection of top-level union members across several constraints. */
 function intersectConstraints(constraints: readonly string[]): string[] | undefined {
-  if (constraints.length === 0) {
+  // `any` / `unknown` / `never` / `{}` carry no usable information — lib.d.ts
+  // uses them for many generic slots (e.g. Object.assign's `{}` source type) —
+  // so keep them from erasing a meaningful constraint by intersecting empty.
+  const informative = constraints.filter(
+    (c) => c !== 'any' && c !== 'unknown' && c !== 'never' && c !== '{}',
+  );
+  // The indexable-object contract is itself an `object`, so when both are
+  // required keep only the narrower Record instead of intersecting to an
+  // empty set (string equality would otherwise see them as disjoint).
+  const normalized = informative.includes(INDEXABLE_OBJECT)
+    ? informative.filter((c) => c !== 'object')
+    : informative;
+  if (normalized.length === 0) {
     return undefined;
   }
   let acc: string[] | undefined;
-  for (const constraint of constraints) {
+  for (const constraint of normalized) {
     const members = splitTopLevelUnion(constraint);
     if (acc === undefined) {
       acc = members;
@@ -971,6 +1028,19 @@ function mergeEvidence(evidence: Evidence): {
     // If every observed value violates the constraints, the constraints are
     // likely over-narrow (e.g. any passed to a generic); keep what was observed.
     members = narrowed.length > 0 ? narrowed : sources;
+    // An empty object literal written through `x[k]` is being used as a
+    // dictionary. Its `{}` type is not indexable, so adopt the indexable-object
+    // constraint — a `{}` initializer is assignable to Record<PropertyKey,
+    // unknown>. Boxed primitives (String/Number/Boolean) are deliberately not
+    // widened this way: they are not assignable to Record and would raise
+    // TS2322 at the initializer, so we keep their real type instead.
+    if (
+      allowed !== undefined &&
+      allowed.includes(INDEXABLE_OBJECT) &&
+      members.every((member) => member === '{}')
+    ) {
+      members = [INDEXABLE_OBJECT];
+    }
   } else if (allowed !== undefined && allowed.length > 0) {
     // No observed values: the required argument types are our best estimate.
     members = allowed;

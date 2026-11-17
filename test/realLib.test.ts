@@ -145,3 +145,84 @@ apply(inc);
   // The concrete signature from the call site must win over the generic callable hint.
   assert.match(output, /fn: \(n: number\) => number/);
 });
+
+test('index access and for-in infer an indexable object for an any binding (xtend)', () => {
+  const output = inferTs(`
+function extend(target: any) {
+  for (let i = 1; i < arguments.length; i++) {
+    const source: any = arguments[i];
+    for (const key in source) {
+      target[key] = source[key];
+    }
+  }
+  return target;
+}
+`);
+  assert.match(output, /target: Record<PropertyKey, unknown>/);
+  assert.match(output, /source: Record<PropertyKey, unknown>/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('Object(value) boxes to an indexable object so JS copy loops stay strict', () => {
+  const { diagnostics, output } = convertJs(`
+function toObject(val) {
+  if (val === null || val === undefined) throw new TypeError('nope');
+  return Object(val);
+}
+function assign(target, source) {
+  var to = toObject(target);
+  var from = Object(source);
+  for (var key in from) {
+    to[key] = from[key];
+  }
+  return to;
+}
+module.exports = assign;
+`);
+  assert.ok(!diagnostics.some((d) => d.includes('TS2407') || d.includes('TS18046')), diagnostics.join('\n'));
+  assert.match(output, /to: Record<PropertyKey, unknown>/);
+});
+
+test('element access on an any binding infers an indexable object', () => {
+  const output = inferTs(`
+function get(x: any, k: string) { return x[k]; }
+`);
+  assert.match(output, /x: Record<PropertyKey, unknown>/);
+});
+
+test('a concrete array source is not overwritten by the indexable-object hint', () => {
+  const output = inferTs(`
+function first(x: any) { return x[0]; }
+first([1, 2, 3]);
+`);
+  assert.match(output, /x: (Array<number>|number\[\])/);
+});
+
+test('an empty object literal used as a dictionary becomes indexable (JS)', () => {
+  const { output, diagnostics } = convertJs(`
+function build() {
+  var bag = {};
+  bag['x'] = 1;
+  bag[0] = 2;
+  return bag;
+}
+`);
+  assert.match(output, /bag: Record<PropertyKey, unknown>/);
+  assert.ok(!diagnostics.some((d) => d.includes('TS7053')), diagnostics.join('\n'));
+});
+
+test('a boxed primitive stays its concrete type rather than an invented any', () => {
+  // Boxed primitives are not assignable to Record<PropertyKey, unknown>, so a
+  // `wrapped[k] = v` write cannot be made strict without inventing `any`. Keep
+  // the concrete `String` type (the remaining TS2542 is an inherent limit).
+  const { output } = convertJs(`
+function probe() {
+  var wrapped = new String('abc');
+  wrapped[5] = 'de';
+  return wrapped;
+}
+`);
+  assert.match(output, /wrapped: String/);
+  assert.doesNotMatch(output, /wrapped: any/);
+});
