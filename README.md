@@ -79,6 +79,17 @@ export const alias: any = snapshot;           // → number（再反查 snapshot
 
 `infer-any` 与 JS 隐式 any 反推（`createUsageResolver`）共用这套迭代引擎。推断结果只增不改（一旦确定就固定），最多 16 轮，实测大型项目（lodash 单文件 579KB / async 102 文件）均在 1 秒内完成。
 
+**嵌套 any 槽位投影**：推断表存的是「整个声明的值类型」，但替换时只把 `any` 所在的那一个槽位投影出来，避免双重包装：
+
+```ts
+const a: any[] = [1, 2];                    // → number[]（不是 Array<number>[]）
+const b: Array<any> = [1, 2];               // → Array<number>
+const m: Map<string, any> = new Map<string, number>(); // → Map<string, number>
+const e: any[] = [];                        // → 保留 any[]（空数组无元素证据，不推断成危险的 never[]）
+```
+
+不嵌套的 `any` 仍按整个类型推断（`let x: any = [1,2]` → `Array<number>`）；函数返回类型 `Promise<any>` + `return 1` → `Promise<number>`，均不受影响。
+
 ```text
 app.ts:6 any -> number
 app.ts:33 keep any (ambiguous candidates: number | string)
@@ -195,7 +206,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 48 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、回调参数与真实项目回归）
+npm test            # 54 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、嵌套 any 槽位投影、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check

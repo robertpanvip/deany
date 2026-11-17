@@ -124,6 +124,41 @@ flag = load();
   assert.match(output, /let flag: boolean;/);
 });
 
+test('does not double-wrap an array element any (any[] shorthand)', () => {
+  const { output } = infer(`const arr: any[] = [1, 2];\n`);
+  assert.match(output, /const arr: number\[\] = \[1, 2\];/);
+  assert.doesNotMatch(output, /Array<number>\[\]/);
+});
+
+test('does not double-wrap Array<any> generic form', () => {
+  const { output } = infer(`const arr: Array<any> = [1, 2];\n`);
+  assert.match(output, /const arr: Array<number> = \[1, 2\];/);
+  assert.doesNotMatch(output, /Array<Array<number>>/);
+});
+
+test('keeps any for an empty array instead of inferring never', () => {
+  const { output } = infer(`const arr: any[] = [];\n`);
+  assert.match(output, /const arr: any\[\] = \[\];/);
+  assert.doesNotMatch(output, /never/);
+});
+
+test('projects array element any through assignments and returns', () => {
+  const assigned = infer(`let a: any[]; a = [1, 2];\n`).output;
+  assert.match(assigned, /let a: number\[\];/);
+  const returned = infer(`function f(): any[] { return [1, 2]; }\n`).output;
+  assert.match(returned, /function f\(\): number\[\]/);
+});
+
+test('projects a generic slot such as Map<string, any>', () => {
+  const { output } = infer(`const m: Map<string, any> = new Map<string, number>();\n`);
+  assert.match(output, /const m: Map<string, number>/);
+});
+
+test('nested any annotation still infers the whole type when not nested', () => {
+  const { output } = infer(`let x: any = [1, 2];\n`);
+  assert.match(output, /let x: Array<number> = \[1, 2\];/);
+});
+
 test('propagates an inferred return type across file boundaries', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'infer-cross-'));
   const a = path.join(directory, 'a.ts');

@@ -111,6 +111,120 @@ function ownerOf(anyNode: ts.Node): ts.Node | undefined {
   return undefined;
 }
 
+/**
+ * The structural position of an `any` token inside its type annotation, as a
+ * sequence of type-argument indices from the outside in. Examples:
+ *   `let x: any`                 -> []       (the whole type)
+ *   `let a: any[]`               -> [0]      (array element)
+ *   `let m: Map<string, any>`    -> [1]      (second type argument)
+ *   `let g: Array<Map<string, any>>` -> [0, 1]
+ * Walking stops as soon as a non-generic type node (or the declaration) is hit.
+ */
+function slotPathOf(anyNode: ts.Node): number[] {
+  const path: number[] = [];
+  let current: ts.Node = anyNode;
+  let parent: ts.Node | undefined = current.parent;
+  while (parent !== undefined) {
+    if (ts.isArrayTypeNode(parent) && parent.elementType === current) {
+      path.unshift(0);
+    } else if (ts.isTypeReferenceNode(parent) && parent.typeArguments !== undefined) {
+      const index = parent.typeArguments.indexOf(current as ts.TypeNode);
+      if (index < 0) {
+        break;
+      }
+      path.unshift(index);
+    } else {
+      break;
+    }
+    current = parent;
+    parent = current.parent;
+  }
+  return path;
+}
+
+/**
+ * Split `Name<A, B>` into its top-level type arguments, honoring nested
+ * generics and delimiter pairs. Returns undefined when `type` has no trailing
+ * generic argument list (i.e. it is not a `Name<...>` form).
+ */
+function splitTypeArguments(type: string): string[] | undefined {
+  const text = type.trim();
+  const open = text.indexOf('<');
+  if (open <= 0) {
+    return undefined;
+  }
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < text.length; i += 1) {
+    const ch = text[i] ?? '';
+    if (ch === '<') {
+      depth += 1;
+    } else if (ch === '>') {
+      depth -= 1;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close !== text.length - 1) {
+    return undefined;
+  }
+  const inner = text.slice(open + 1, close);
+  const parts: string[] = [];
+  let generic = 0;
+  let delimiter = 0;
+  let start = 0;
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i] ?? '';
+    if (ch === '<') {
+      generic += 1;
+    } else if (ch === '>') {
+      generic -= 1;
+    } else if (ch === '(' || ch === '[' || ch === '{') {
+      delimiter += 1;
+    } else if (ch === ')' || ch === ']' || ch === '}') {
+      delimiter -= 1;
+    } else if (ch === ',' && generic === 0 && delimiter === 0) {
+      parts.push(inner.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(inner.slice(start).trim());
+  return parts;
+}
+
+/**
+ * Project an inferred whole value type onto the slot an `any` token occupies.
+ * `Array<number>` projected by [0] yields `number`; a scalar type projected by
+ * a non-empty path (e.g. a function whose `Promise<any>` return was inferred
+ * from a bare `return 1`) cannot be projected, so the whole type is returned —
+ * that scalar is already aligned with the slot. `never` is returned as-is so
+ * the caller can treat it as "no element evidence" (empty array).
+ */
+function projectSlotType(fullType: string, path: readonly number[]): string {
+  if (path.length === 0) {
+    return fullType;
+  }
+  let current = fullType.trim();
+  for (const index of path) {
+    if (current.endsWith('[]')) {
+      current = current.slice(0, -2).trim();
+      continue;
+    }
+    const args = splitTypeArguments(current);
+    if (args === undefined) {
+      return fullType;
+    }
+    const picked = args[index];
+    if (picked === undefined) {
+      return fullType;
+    }
+    current = picked;
+  }
+  return current;
+}
+
 function symbolOf(owner: ts.Node, checker: ts.TypeChecker): ts.Symbol | undefined {
   if (
     ts.isVariableDeclaration(owner) ||
@@ -617,14 +731,19 @@ export function inferAnyInProject(
         } else {
           const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
           const original = node.getText(sourceFile);
-          const inferred = ownerType(ctx.table, owner);
-          if (inferred !== undefined) {
+          const wholeType = ownerType(ctx.table, owner);
+          // The owner's inferred type describes the whole value. Project it
+          // onto the position this `any` token actually occupies so nested
+          // slots (`any[]`, `Array<any>`, `Map<K, any>`) are not double-wrapped.
+          const projected = wholeType === undefined ? undefined : projectSlotType(wholeType, slotPathOf(node));
+          const usable = projected !== 'never' ? projected : undefined;
+          if (usable !== undefined) {
             edits.push({
               start: node.getStart(sourceFile),
               end: node.end,
-              text: parenthesizeIfComposite(inferred),
+              text: parenthesizeIfComposite(usable),
             });
-            sites.push({ file: fileName, line, start: node.getStart(sourceFile), end: node.end, original, inferred });
+            sites.push({ file: fileName, line, start: node.getStart(sourceFile), end: node.end, original, inferred: usable });
           } else if (options.reportAmbiguous) {
             const merged = mergeEvidence(collectEvidence(owner, ctx));
             sites.push({ file: fileName, line, start: node.getStart(sourceFile), end: node.end, original, reason: merged.reason });
