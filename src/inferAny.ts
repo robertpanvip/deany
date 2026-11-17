@@ -515,9 +515,21 @@ function constraintsFromReference(
     addSource(evidence, typeText(ctx, parent.right));
   }
 
+  // A property access on the binding. If it is used as a call (`x.for(1)`),
+  // record a callable signature so strict mode does not reject `x.for(...)`;
+  // `unknown` would trigger TS18046 ("not callable"). A method signature, once
+  // recorded, is never downgraded to a plain `unknown` by a later read.
   if (ts.isPropertyAccessExpression(parent) && parent.expression === reference) {
-    const propertyType = typeText(ctx, parent) ?? 'unknown';
-    evidence.properties.set(parent.name.text, propertyType);
+    const grandparent = parent.parent;
+    const isMethodCall =
+      ts.isCallExpression(grandparent) && grandparent.expression === parent;
+    const METHOD_TYPE = '(...args: unknown[]) => unknown';
+    const previous = evidence.properties.get(parent.name.text);
+    if (isMethodCall || previous === METHOD_TYPE) {
+      evidence.properties.set(parent.name.text, METHOD_TYPE);
+    } else {
+      evidence.properties.set(parent.name.text, typeText(ctx, parent) ?? 'unknown');
+    }
   }
 
   // `this.field = expr` / `obj.field = expr`: the reference is the property name.

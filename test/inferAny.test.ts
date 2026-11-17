@@ -415,3 +415,36 @@ let copy: any = value;
 `);
   assert.match(output, /let copy: Box = value;/);
 });
+
+test('infers an object shape with a callable method from a method call', () => {
+  const { output } = infer(`let x: any; x.for(1);\n`);
+  assert.match(output, /let x: \{ for: \(\.\.\.args: unknown\[\]\) => unknown; \}/);
+  assert.doesNotMatch(output, /for: unknown/);
+});
+
+test('infers multiple methods and plain properties on the same object', () => {
+  const { output } = infer(`let x: any; x.for(1); const v = x.name;\n`);
+  assert.match(output, /for: \(\.\.\.args: unknown\[\]\) => unknown;/);
+  assert.match(output, /name: unknown;/);
+});
+
+test('does not downgrade a method signature to unknown when read first', () => {
+  const { output } = infer(`let x: any; const a = x.for; x.for(1);\n`);
+  assert.match(output, /for: \(\.\.\.args: unknown\[\]\) => unknown;/);
+  assert.doesNotMatch(output, /for: unknown/);
+});
+
+test('does not misclassify a plain property read as a method', () => {
+  const { output } = infer(`let x: any; const v = x.name;\n`);
+  assert.match(output, /let x: \{ name: unknown; \}/);
+  assert.doesNotMatch(output, /name: \(/);
+});
+
+test('back-propagates an inferred object shape to the call site', () => {
+  const { output } = infer(`
+function setup(x: any) { x.for(1); }
+let value: any;
+setup(value);
+`);
+  assert.match(output, /let value: \{ for: \(\.\.\.args: unknown\[\]\) => unknown; \}/);
+});
