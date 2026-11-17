@@ -96,3 +96,11 @@ let alias = snapshot;
   assert.match(output, /let snapshot: number = load\(\);/);
   assert.match(output, /let alias: number = snapshot;/);
 });
+
+test('infers an undocumented JS variable as object from Object.defineProperty', () => {
+  const output = convertJs(`
+let config;
+Object.defineProperty(config, 'key', { value: 1 });
+`);
+  assert.match(output, /let config: object;/);
+});

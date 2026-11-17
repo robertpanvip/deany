@@ -479,6 +479,60 @@ function isArrayIsArrayCall(call: ts.CallExpression): boolean {
 }
 
 /**
+ * Built-in APIs whose parameter slots semantically require an object even
+ * though their `lib.d.ts` signatures type the slot as `any` or a bare generic
+ * `T` (e.g. `Object.defineProperty<T>(o: T, ...)`). Passing an `any` binding
+ * into one of these slots is a contravariant constraint: the value must be
+ * assignable to `object`. Keyed by `<receiver>.<method>`; values are the
+ * zero-based argument indices that require an object.
+ */
+const OBJECT_ARGUMENT_APIS: Readonly<Record<string, readonly number[]>> = {
+  'Object.assign': [0], // target (trailing sources may legally be null/undefined)
+  'Object.defineProperties': [0],
+  'Object.defineProperty': [0],
+  'Object.entries': [0],
+  'Object.freeze': [0],
+  'Object.getOwnPropertyDescriptor': [0],
+  'Object.getOwnPropertyDescriptors': [0],
+  'Object.getOwnPropertyNames': [0],
+  'Object.getOwnPropertySymbols': [0],
+  'Object.getPrototypeOf': [0],
+  'Object.hasOwn': [0],
+  'Object.isExtensible': [0],
+  'Object.isFrozen': [0],
+  'Object.isSealed': [0],
+  'Object.keys': [0],
+  'Object.preventExtensions': [0],
+  'Object.seal': [0],
+  'Object.setPrototypeOf': [0],
+  'Object.values': [0],
+  'Reflect.apply': [0],
+  'Reflect.construct': [0],
+  'Reflect.defineProperty': [0],
+  'Reflect.deleteProperty': [0],
+  'Reflect.get': [0],
+  'Reflect.getOwnPropertyDescriptor': [0],
+  'Reflect.getPrototypeOf': [0],
+  'Reflect.has': [0],
+  'Reflect.ownKeys': [0],
+  'Reflect.set': [0],
+  'Reflect.setPrototypeOf': [0],
+};
+
+/** Argument indices that require an object for a known built-in call. */
+function objectArgumentIndices(call: ts.CallExpression): readonly number[] | undefined {
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee)) {
+    return undefined;
+  }
+  const receiver = callee.expression.getText(callee.getSourceFile());
+  if (receiver !== 'Object' && receiver !== 'Reflect') {
+    return undefined;
+  }
+  return OBJECT_ARGUMENT_APIS[`${receiver}.${callee.name.text}`];
+}
+
+/**
  * Instance type produced by `x instanceof Ctor`, or undefined if the right
  * operand has no usable class/function symbol (e.g. a complex expression).
  */
@@ -581,13 +635,25 @@ function constraintsFromReference(
   } else if (ts.isCallExpression(parent)) {
     const index = parent.arguments.indexOf(reference);
     if (index >= 0) {
-      const signature = ctx.checker.getResolvedSignature(parent);
-      const parameter = signature?.getParameters()[index];
-      if (parameter !== undefined) {
-        const parameterDecl = parameter.valueDeclaration ?? parameter.declarations?.[0];
-        const inferred =
-          parameterDecl === undefined ? undefined : ctx.table.declarations.get(parameterDecl);
-        addConstraint(evidence, inferred ?? symbolTypeText(ctx, parameter, parent));
+      // Built-ins like Object.defineProperty / Reflect.set demand an object at
+      // this slot even though lib.d.ts types it as `any` / a bare `T` / `{}`.
+      // That is a contravariant constraint: the binding must at least be an
+      // object. Skip the lib-declared parameter type for these slots — checker
+      // widens `object` to `{}`, which would intersect with `object` into an
+      // empty set and erase the evidence.
+      const objectArgs = objectArgumentIndices(parent);
+      const isObjectSlot = objectArgs !== undefined && objectArgs.includes(index);
+      if (isObjectSlot) {
+        addConstraint(evidence, 'object');
+      } else {
+        const signature = ctx.checker.getResolvedSignature(parent);
+        const parameter = signature?.getParameters()[index];
+        if (parameter !== undefined) {
+          const parameterDecl = parameter.valueDeclaration ?? parameter.declarations?.[0];
+          const inferred =
+            parameterDecl === undefined ? undefined : ctx.table.declarations.get(parameterDecl);
+          addConstraint(evidence, inferred ?? symbolTypeText(ctx, parameter, parent));
+        }
       }
     }
   }

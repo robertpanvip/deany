@@ -517,3 +517,64 @@ isEmpty(value);
   assert.doesNotMatch(output, /<K|Set<T>|Map<K/);
   assert.match(output, /let value:/);
 });
+
+test('infers object from an any passed to Object.defineProperty', () => {
+  const { output, sites } = infer(`
+let x: any;
+Object.defineProperty(x, 'key', { value: 1 });
+`);
+  assert.match(output, /let x: object;/);
+  assert.equal(sites.filter((site) => site.inferred === 'object').length, 1);
+});
+
+test('infers object from Object.defineProperties and Reflect.set', () => {
+  const first = infer(`let x: any; Object.defineProperties(x, {});\n`).output;
+  assert.match(first, /let x: object;/);
+  const second = infer(`let x: any; Reflect.set(x, 'k', 1);\n`).output;
+  assert.match(second, /let x: object;/);
+});
+
+test('back-propagates an Object.defineProperty object parameter to the call site', () => {
+  const { output } = infer(`
+function setup(x: any) { Object.defineProperty(x, 'key', { value: 1 }); }
+let value: any;
+setup(value);
+`);
+  assert.match(output, /function setup\(x: object\)/);
+  assert.match(output, /let value: object;/);
+});
+
+test('keeps a concrete object initializer instead of the weaker object constraint', () => {
+  const { output } = infer(`
+let x: any = { a: 1 };
+Object.defineProperty(x, 'b', { value: 2 });
+`);
+  assert.match(output, /let x: \{[^}]*a: number[^}]*\}/);
+});
+
+test('still infers object for Object.keys whose lib signature is already object', () => {
+  const { output } = infer(`
+let x: any;
+Object.keys(x);
+`);
+  assert.match(output, /let x: object;/);
+});
+
+test('leaves any untouched for an unrelated call named defineProperty', () => {
+  const { output } = infer(`
+declare function defineProperty(o: any, k: string): void;
+let x: any;
+defineProperty(x, 'k');
+`);
+  assert.match(output, /let x: any;/);
+});
+
+test('keeps any when object and string constraints conflict', () => {
+  const { output } = infer(`
+declare function takeString(s: string): void;
+let x: any;
+Object.defineProperty(x, 'a', { value: 1 });
+takeString(x);
+`);
+  assert.match(output, /let x: any;/);
+});

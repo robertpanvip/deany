@@ -63,11 +63,12 @@ node bin/jsdoc2ts.js infer-any app.ts -o app.inferred.ts --check
 | 函数 `return` 语句 | `function f(): any { return 123 }` → `number` |
 | 属性赋值 | `this.value = 'ok'` → `string` |
 | 属性访问集合 | `x.foo` / `x.bar` → 合成 `{ foo: T; bar: U }`（仅当无其他证据时）；方法调用 `x.for(1)` → 成员记为可调用签名 `(...args: unknown[]) => unknown` |
+| 内置 API 的对象槽位 | `Object.defineProperty(x, ...)` / `Reflect.set(x, ...)` 等要求对象的参数 → 逆变约束 `object`（`lib.d.ts` 把这些形参写成 `any`/`T`/`{}` 时也能反推；与更具体的来源共存时以来源为准） |
 
 证据按**方差**分组并按各自规则合并：
 
 - **协变来源**（初始化器、赋值右侧、`return`、算术、`typeof`）：描述「值是什么」。多个不同来源不再视为歧义，而是合并为**联合类型**——既被赋 `number` 又被赋 `string` 的 binding，真实类型就是 `number | string`。字面量会放大（`42` → `number`），嵌套联合展平去重，顺序稳定。
-- **逆变约束**（作为实参传入形参）：描述「值必须满足什么」。多个调用点约束取**交集**——同时传给 `f(number|string)` 和 `g(boolean|string)` 的值只能是 `string`。无来源时以约束为准；有来源时约束用于收窄。
+- **逆变约束**（作为实参传入形参）：描述「值必须满足什么」。多个调用点约束取**交集**——同时传给 `f(number|string)` 和 `g(boolean|string)` 的值只能是 `string`。无来源时以约束为准；有来源时约束用于收窄。内置 API 的对象参数（`Object.defineProperty` / `Reflect.*` 等）即使 `lib.d.ts` 写成 `any` / `T` / `{}`，也会登记一条 `object` 约束（这些槽位的 lib 参数类型无信息量，会被跳过以免 `{}` 与 `object` 相交成空集）。
 - **属性形状**是最后手段，仅当上面两类都没有证据时才用来合成对象类型，避免 `arr.push` 之类 incidental 访问污染数组推断。方法调用 `x.for(1)` 会记录为可调用成员 `(...args: unknown[]) => unknown`（而非 `unknown`——后者在 strict 下不可调用，会触发 TS18046）；方法签名一旦确立就不会被后续的普通属性读取降级。
 
 联合类型成员会按需加括号（函数成员、嵌套位置）以保证严格语法正确。只有完全没有任何证据时才保留 `any` 并报告 `no usage evidence`。
@@ -259,7 +260,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 91 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
+npm test            # 99 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
