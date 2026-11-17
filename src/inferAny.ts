@@ -672,6 +672,22 @@ function constraintsFromReference(
     }
   }
 
+  // `fn(...)`: the binding is used as the callee itself. Record a callable
+  // signature as a contravariant constraint (the value must be callable) —
+  // not a covariant source — so a concrete signature observed at a call site
+  // still wins, while a binding seen only as a callee becomes callable instead
+  // of `unknown` (which strict mode would reject with TS18046). This also
+  // reaches callees invoked inside nested callbacks, since referencesOf walks
+  // the whole program rather than a single function body.
+  if (ts.isCallExpression(parent) && parent.expression === reference) {
+    addConstraint(evidence, '(...args: unknown[]) => unknown');
+  }
+
+  // `new Ctor()`: same idea, but the value must be constructable.
+  if (ts.isNewExpression(parent) && parent.expression === reference) {
+    addConstraint(evidence, 'new (...args: unknown[]) => unknown');
+  }
+
   // `x instanceof Ctor` narrows x to the constructor's instance type.
   if (
     ts.isBinaryExpression(parent) &&

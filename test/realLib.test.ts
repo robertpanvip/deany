@@ -106,3 +106,42 @@ module.exports = mimicFn;
 `);
   assert.match(output, /\(to: object, from: object\)/);
 });
+
+test('infers a callable type for a parameter called as a function (p-try)', () => {
+  const output = inferTs(`
+function pTry(fn: any, ...args: any[]) {
+  return new Promise(resolve => {
+    resolve(fn(...args));
+  });
+}
+`);
+  assert.match(output, /fn: \(\.\.\.args: unknown\[\]\) => unknown/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('a callee-called any parameter that is also passed around keeps a callable type', () => {
+  const output = inferTs(`
+function invoke(fn: any) { return fn(1, 2); }
+`);
+  assert.match(output, /fn: \(\.\.\.args: unknown\[\]\) => unknown/);
+});
+
+test('new on an any parameter infers a construct signature', () => {
+  const output = inferTs(`
+function create(Ctor: any) { return new Ctor(); }
+`);
+  assert.doesNotMatch(output, /Ctor: unknown/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('a callee-called any with a concrete call-site argument keeps the concrete signature', () => {
+  const output = inferTs(`
+function apply(fn: any) { return fn(1); }
+declare function inc(n: number): number;
+apply(inc);
+`);
+  // The concrete signature from the call site must win over the generic callable hint.
+  assert.match(output, /fn: \(n: number\) => number/);
+});

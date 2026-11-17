@@ -260,7 +260,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 103 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、typeof function 合法化、catch 变量注解规避、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
+npm test            # 107 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、typeof function 合法化、catch 变量注解规避、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
@@ -297,6 +297,7 @@ npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
 - `typeof x === 'function'` 曾把非法类型 `function` 直接写回注解（不是合法 TS 类型名）；现映射为 `Function`（strict 下可调用、可访问 `.name`/`.prototype`，也能接 `Function` 值）。
 - catch 子句变量曾从 `err.message` 等推断出对象形状并写回注解，触发 `TS1196`（catch 变量只允许 `any`/`unknown`）；现跳过，保留默认 `unknown`。
 - 内置 API 的对象参数槽位（`Object.defineProperty` / `Reflect.*` 等）即使 `lib.d.ts` 把形参写成 `any`/`T`/`{}` 也能反推出 `object` 约束（见上文「证据来源」）。
+- 变量作为 callee 被调用（`fn(...)`）或 `new Ctor()` 时，即使在嵌套回调里，也会反推出可调用 / 可构造签名，而不是留在 `unknown`（消除 `TS18046`，如 p-try）；下游若有更具体的 call-site 签名则以具体值为准。
 
 仍存在的局限（属于"JS 动态模式 → strict TS"的固有难度，非语法 bug）：
 
