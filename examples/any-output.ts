@@ -30,7 +30,7 @@ class Box {
 /**
  * 证据冲突，保留 any 并报告。
  */
-let unresolved: any;
+let unresolved: (number | string);
 unresolved = 1;
 unresolved = 'a';
 

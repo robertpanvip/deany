@@ -62,9 +62,15 @@ node bin/jsdoc2ts.js infer-any app.ts -o app.inferred.ts --check
 | 函数外部调用实参 | `greet(who: any)` + `greet('Ada')` → `string` |
 | 函数 `return` 语句 | `function f(): any { return 123 }` → `number` |
 | 属性赋值 | `this.value = 'ok'` → `string` |
-| 属性访问集合 | `x.foo` / `x.bar` → 合成 `{ foo: T; bar: U }` |
+| 属性访问集合 | `x.foo` / `x.bar` → 合成 `{ foo: T; bar: U }`（仅当无其他证据时） |
 
-合并策略：所有证据一致才替换；字面量会放大为原始类型（`42` → `number`）；联合类型会加括号避免 `any[]` 这类位置出错；证据冲突时**保留 `any`** 并输出歧义报告，不猜测。
+证据按**方差**分组并按各自规则合并：
+
+- **协变来源**（初始化器、赋值右侧、`return`、算术、`typeof`）：描述「值是什么」。多个不同来源不再视为歧义，而是合并为**联合类型**——既被赋 `number` 又被赋 `string` 的 binding，真实类型就是 `number | string`。字面量会放大（`42` → `number`），嵌套联合展平去重，顺序稳定。
+- **逆变约束**（作为实参传入形参）：描述「值必须满足什么」。多个调用点约束取**交集**——同时传给 `f(number|string)` 和 `g(boolean|string)` 的值只能是 `string`。无来源时以约束为准；有来源时约束用于收窄。
+- **属性形状**是最后手段，仅当上面两类都没有证据时才用来合成对象类型，避免 `arr.push` 之类 incidental 访问污染数组推断。
+
+联合类型成员会按需加括号（函数成员、嵌套位置）以保证严格语法正确。只有完全没有任何证据时才保留 `any` 并报告 `no usage evidence`。
 
 **链式传播（fixed point）**：推断是迭代到收敛的——一个已经推断出的类型会作为证据喂给下一轮，因此「函数返回 → 接住它的变量 → 再接住的变量」可以正向串起来，且**跨文件 / 跨 import** 同样生效：
 
@@ -92,8 +98,8 @@ const e: any[] = [];                        // → 保留 any[]（空数组无�
 
 ```text
 app.ts:6 any -> number
-app.ts:33 keep any (ambiguous candidates: number | string)
-files: 1, changed: 1, inferred sites: 5, unresolved: 1
+app.ts:33 any -> number | string          # 冲突证据合并为联合类型
+files: 1, changed: 1, inferred sites: 6, unresolved: 0
 strict type check passed.
 ```
 
@@ -206,7 +212,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 54 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、嵌套 any 槽位投影、回调参数与真实项目回归）
+npm test            # 57 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、嵌套 any 槽位投影、方差感知的联合/交集推断、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
@@ -217,7 +223,7 @@ npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
 - 只解析每行一个标签的 JSDoc（多行描述会并入上一个标签）。
 - 不处理 `@implements`、`@extends`、`@override` 与复杂 `@enum`。
 - 非常复杂的 JSDoc 类型（嵌套函数签名、条件类型）按原样透传，可能需要人工微调。
-- `infer-any` 只在证据一致时替换；跨文件的复杂泛型/重载调用可能证据不足，会保留 `any` 并报告。
+- `infer-any` 把协变来源合并为联合、逆变约束合并为交集；只有完全无证据（或上游已是 `any`）时保留 `any` 并报告。跨文件的复杂泛型/重载调用可能证据不足。
 - 转出的 TS 保证类型严格，但 scriptc 的 Tier 3 限制（如 `eval`、动态元编程）仍需另行处理。
 
 ### 真实项目压测说明

@@ -434,18 +434,33 @@ function callsOf(
   return calls;
 }
 
+/**
+ * Usage evidence is split by variance:
+ * - `sources` are covariant (values the binding receives: initializers,
+ *   assignments, returns, arithmetic). Multiple sources form a union.
+ * - `constraints` are contravariant (types the binding must be assignable to,
+ *   e.g. when passed as a call argument). Multiple constraints are intersected.
+ * - `properties` describe an object's shape, used only as a last-resort source.
+ */
 interface Evidence {
-  readonly types: string[];
+  readonly sources: string[];
+  readonly constraints: string[];
   readonly properties: Map<string, string>;
 }
 
 function emptyEvidence(): Evidence {
-  return { types: [], properties: new Map<string, string>() };
+  return { sources: [], constraints: [], properties: new Map<string, string>() };
 }
 
-function addType(evidence: Evidence, type: string | undefined): void {
+function addSource(evidence: Evidence, type: string | undefined): void {
   if (type !== undefined) {
-    evidence.types.push(type);
+    evidence.sources.push(type);
+  }
+}
+
+function addConstraint(evidence: Evidence, type: string | undefined): void {
+  if (type !== undefined) {
+    evidence.constraints.push(type);
   }
 }
 
@@ -462,7 +477,7 @@ function constraintsFromReference(
     parent.left === reference &&
     parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
   ) {
-    addType(evidence, typeText(ctx, parent.right));
+    addSource(evidence, typeText(ctx, parent.right));
   }
 
   if (ts.isPropertyAccessExpression(parent) && parent.expression === reference) {
@@ -478,16 +493,18 @@ function constraintsFromReference(
     parent.parent.left === parent &&
     parent.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
   ) {
-    addType(evidence, typeText(ctx, parent.parent.right));
+    addSource(evidence, typeText(ctx, parent.parent.right));
   }
 
+  // A binding passed as an argument must be assignable to the parameter type.
+  // This is a contravariant constraint; multiple such constraints intersect.
   if (ts.isCallExpression(parent)) {
     const index = parent.arguments.indexOf(reference);
     if (index >= 0) {
       const signature = ctx.checker.getResolvedSignature(parent);
       const parameter = signature?.getParameters()[index];
       if (parameter !== undefined) {
-        addType(evidence, symbolTypeText(ctx, parameter, parent));
+        addConstraint(evidence, symbolTypeText(ctx, parameter, parent));
       }
     }
   }
@@ -496,7 +513,7 @@ function constraintsFromReference(
     ts.isBinaryExpression(parent) &&
     (parent.left === reference || parent.right === reference)
   ) {
-    addType(evidence, arithmeticNumberType(ctx, parent));
+    addSource(evidence, arithmeticNumberType(ctx, parent));
   }
 
   if (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) {
@@ -506,7 +523,7 @@ function constraintsFromReference(
       parent.operator === ts.SyntaxKind.PlusToken ||
       parent.operator === ts.SyntaxKind.MinusToken
     ) {
-      addType(evidence, 'number');
+      addSource(evidence, 'number');
     }
   }
 
@@ -514,7 +531,7 @@ function constraintsFromReference(
     // `typeof x === 'string'` is a useful hint but not authoritative.
     const binary = parent.parent;
     if (ts.isBinaryExpression(binary) && ts.isStringLiteral(binary.right)) {
-      addType(evidence, binary.right.text);
+      addSource(evidence, binary.right.text);
     }
   }
 }
@@ -529,7 +546,7 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
     ts.isPropertySignature(owner)
   ) {
     if ('initializer' in owner && owner.initializer !== undefined) {
-      addType(evidence, typeText(ctx, owner.initializer));
+      addSource(evidence, typeText(ctx, owner.initializer));
     }
   }
 
@@ -539,7 +556,7 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
         return;
       }
       if (ts.isReturnStatement(node) && node.expression !== undefined) {
-        addType(
+        addSource(
           evidence,
           typeText(ctx, node.expression) ?? arithmeticNumberType(ctx, node.expression),
         );
@@ -562,7 +579,7 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
     for (const call of callsOf(functionNode, ctx)) {
       const argument = call.arguments[index];
       if (argument !== undefined) {
-        addType(evidence, typeText(ctx, argument));
+        addSource(evidence, typeText(ctx, argument));
       }
     }
   }
@@ -584,26 +601,114 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
   return evidence;
 }
 
-/** Merge collected evidence into a single type, or explain why it is ambiguous. */
+/**
+ * Split a type string on top-level `|`, honoring nested generics, parentheses,
+ * braces and brackets so unions inside type arguments are left intact.
+ */
+function splitTopLevelUnion(type: string): string[] {
+  const parts: string[] = [];
+  let generic = 0;
+  let paren = 0;
+  let brace = 0;
+  let bracket = 0;
+  let start = 0;
+  for (let i = 0; i < type.length; i += 1) {
+    const ch = type[i] ?? '';
+    if (ch === '<') {
+      generic += 1;
+    } else if (ch === '>') {
+      generic -= 1;
+    } else if (ch === '(') {
+      paren += 1;
+    } else if (ch === ')') {
+      paren -= 1;
+    } else if (ch === '{') {
+      brace += 1;
+    } else if (ch === '}') {
+      brace -= 1;
+    } else if (ch === '[') {
+      bracket += 1;
+    } else if (ch === ']') {
+      bracket -= 1;
+    } else if (ch === '|' && generic === 0 && paren === 0 && brace === 0 && bracket === 0) {
+      parts.push(type.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(type.slice(start).trim());
+  return parts.filter((part) => part.length > 0);
+}
+
+/** Set intersection of top-level union members across several constraints. */
+function intersectConstraints(constraints: readonly string[]): string[] | undefined {
+  if (constraints.length === 0) {
+    return undefined;
+  }
+  let acc: string[] | undefined;
+  for (const constraint of constraints) {
+    const members = splitTopLevelUnion(constraint);
+    if (acc === undefined) {
+      acc = members;
+    } else {
+      acc = acc.filter((member) => members.includes(member));
+    }
+  }
+  return acc ?? [];
+}
+
+/**
+ * Merge variance-tagged evidence into a single concrete type.
+ *
+ * Covariant `sources` (values the binding receives) form a union: a binding
+ * seen as both `number` and `string` is genuinely `number | string`. Nested
+ * unions are flattened, de-duplicated and sorted for deterministic output.
+ *
+ * Contravariant `constraints` (types the binding must satisfy, e.g. call
+ * arguments) are intersected: a value passed to `f(number|string)` and
+ * `g(boolean|string)` must be `string`. If both exist, sources are narrowed to
+ * the members allowed by every constraint; when that leaves nothing the
+ * (possibly over-narrow) sources win, since they are observed concrete values.
+ *
+ * Synthesized object `properties` are a last resort, used only when there is
+ * no source evidence — otherwise incidental accesses like `arr.push` on an
+ * already-typed array would pollute the inferred type.
+ */
 function mergeEvidence(evidence: Evidence): { type?: string; reason?: string } {
-  const candidates = [...evidence.types];
-  if (evidence.properties.size > 0) {
-    const members = [...evidence.properties.entries()].map(([name, type]) => {
+  const sources = [...new Set(evidence.sources.flatMap(splitTopLevelUnion))];
+  const allowed = intersectConstraints(evidence.constraints);
+  let members: string[];
+
+  if (sources.length > 0) {
+    // Observed values are authoritative; constraints may narrow them.
+    const narrowed = allowed === undefined ? sources : sources.filter((member) => allowed.includes(member));
+    // If every observed value violates the constraints, the constraints are
+    // likely over-narrow (e.g. any passed to a generic); keep what was observed.
+    members = narrowed.length > 0 ? narrowed : sources;
+  } else if (allowed !== undefined && allowed.length > 0) {
+    // No observed values: the required argument types are our best estimate.
+    members = allowed;
+  } else if (evidence.properties.size > 0) {
+    // Last resort: synthesize an object shape from accessed properties.
+    const fields = [...evidence.properties.entries()].map(([name, type]) => {
       const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
       return `${key}: ${type};`;
     });
-    candidates.push(`{ ${members.join(' ')} }`);
-  }
-
-  const unique = [...new Set(candidates)];
-  if (unique.length === 0) {
+    members = [`{ ${fields.join(' ')} }`];
+  } else {
     return { reason: 'no usage evidence' };
   }
-  if (unique.length === 1) {
-    const only = unique[0];
+
+  members = [...new Set(members)].sort();
+  if (members.length === 0) {
+    return { reason: 'contradictory constraints' };
+  }
+  if (members.length === 1) {
+    const only = members[0];
     return only === undefined ? { reason: 'no usage evidence' } : { type: only };
   }
-  return { reason: `ambiguous candidates: ${unique.join(' | ')}` };
+  // A bare function type is illegal as a union member without parentheses.
+  const formatted = members.map((member) => (hasTopLevelArrow(member) ? `(${member})` : member));
+  return { type: formatted.join(' | ') };
 }
 
 /** All declarations that carry an `any` annotation, across non-declaration files. */

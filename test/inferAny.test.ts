@@ -67,15 +67,50 @@ class Box {
   assert.match(output, /value: string;/);
 });
 
-test('keeps any when usage evidence conflicts', () => {
+test('merges conflicting usage evidence into a union type', () => {
   const { output, sites } = infer(`
 let mixed: any;
 mixed = 1;
 mixed = 'a';
 `);
-  assert.match(output, /let mixed: any;/);
+  assert.match(output, /let mixed: \(?number \| string\)?;/);
   assert.equal(sites.length, 1);
-  assert.match(sites[0]?.reason ?? '', /ambiguous/);
+  assert.equal(sites[0]?.inferred, 'number | string');
+});
+
+test('flattens and de-duplicates unions coming from multiple sources', () => {
+  const { output } = infer(`
+declare const u: number | string;
+let v: any;
+v = u;
+v = booleanValue;
+declare const booleanValue: boolean;
+`);
+  const decl = output.match(/let v: \(?([^;]+?)\)?;/)?.[1] ?? '';
+  const members = decl.split(' | ').map((m) => m.trim());
+  assert.deepEqual(members.sort(), ['boolean', 'number', 'string']);
+});
+
+test('intersects contravariant constraints from multiple call sites', () => {
+  const { output } = infer(`
+declare function take(v: number | string): void;
+declare function take2(v: boolean | string): void;
+let v: any;
+take(v);
+take2(v);
+`);
+  // string is the only type accepted by both call sites (intersection).
+  assert.match(output, /let v: string;/);
+});
+
+test('parenthesizes a function type merged into a union', () => {
+  const { output } = infer(`
+let handler: any;
+handler = function (): number { return 1; };
+handler = 'later';
+`);
+  assert.doesNotMatch(output, /let handler: any;/);
+  assert.match(output, /\(\(\) => number\) \| string|string \| \(\(\) => number\)/);
 });
 
 test('ignores type assertions by default', () => {
