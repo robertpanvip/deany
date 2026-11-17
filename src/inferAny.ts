@@ -523,28 +523,6 @@ function typeofLiteralToType(literal: string): string {
  */
 const INDEXABLE_OBJECT = 'Record<PropertyKey, unknown>';
 
-/** Callable signature recorded for a property used as a method (`x.for()`). */
-const CALLABLE_MEMBER = '(...args: unknown[]) => unknown';
-
-/**
- * Exclusive method names used for the method-cluster back-inference heuristic.
- * Only methods unique to one type are listed — shared ones (`indexOf`, `slice`,
- * `concat`, `at`, ...) are deliberately omitted so a wrong guess is avoided.
- * When a binding's ONLY evidence is calls to members of a single cluster, we
- * infer that primitive/collection type rather than an opaque object shape.
- */
-const STRING_ONLY_METHODS = new Set([
-  'toUpperCase', 'toLowerCase', 'charAt', 'charCodeAt', 'substring', 'substr',
-  'trim', 'trimStart', 'trimEnd', 'padStart', 'padEnd', 'startsWith', 'endsWith',
-  'repeat', 'replace', 'replaceAll', 'split', 'match', 'matchAll', 'search',
-  'localeCompare', 'normalize',
-]);
-const ARRAY_ONLY_METHODS = new Set([
-  'push', 'pop', 'shift', 'unshift', 'map', 'filter', 'reduce', 'reduceRight',
-  'forEach', 'find', 'findIndex', 'findLast', 'findLastIndex', 'some', 'every',
-  'sort', 'reverse', 'splice', 'join', 'flat', 'flatMap', 'fill', 'keys', 'entries',
-]);
-
 /** Bitwise operators coerce both operands to int32 in JavaScript. */
 const BITWISE_OPERATORS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.AmpersandToken,
@@ -692,9 +670,10 @@ function constraintsFromReference(
     const grandparent = parent.parent;
     const isMethodCall =
       ts.isCallExpression(grandparent) && grandparent.expression === parent;
+    const METHOD_TYPE = '(...args: unknown[]) => unknown';
     const previous = evidence.properties.get(parent.name.text);
-    if (isMethodCall || previous === CALLABLE_MEMBER) {
-      evidence.properties.set(parent.name.text, CALLABLE_MEMBER);
+    if (isMethodCall || previous === METHOD_TYPE) {
+      evidence.properties.set(parent.name.text, METHOD_TYPE);
     } else {
       evidence.properties.set(parent.name.text, typeText(ctx, parent) ?? 'unknown');
     }
@@ -1164,31 +1143,13 @@ function mergeEvidence(evidence: Evidence): {
     // No observed values: the required argument types are our best estimate.
     members = allowed;
   } else if (evidence.properties.size > 0) {
-    // Method-cluster heuristic: if the only evidence is calls to members of a
-    // single exclusive method cluster, infer that type rather than an opaque
-    // shape. Marked weak so a concrete source in a later round still wins.
-    // Requires EVERY property to be a recorded method call in the SAME cluster;
-    // mixed or non-method properties fall through to the shape synthesis.
-    const entries = [...evidence.properties.entries()];
-    const allCallable = entries.every(([, type]) => type === CALLABLE_MEMBER);
-    const names = entries.map(([name]) => name);
-    const inCluster = (cluster: ReadonlySet<string>): boolean =>
-      allCallable && names.length > 0 && names.every((name) => cluster.has(name));
-    if (inCluster(STRING_ONLY_METHODS)) {
-      members = ['string'];
-      weak = true;
-    } else if (inCluster(ARRAY_ONLY_METHODS)) {
-      members = ['unknown[]'];
-      weak = true;
-    } else {
-      // Last resort: synthesize an object shape from accessed properties.
-      const fields = entries.map(([name, type]) => {
-        const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
-        return `${key}: ${type};`;
-      });
-      members = [`{ ${fields.join(' ')} }`];
-      weak = true;
-    }
+    // Last resort: synthesize an object shape from accessed properties.
+    const fields = [...evidence.properties.entries()].map(([name, type]) => {
+      const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
+      return `${key}: ${type};`;
+    });
+    members = [`{ ${fields.join(' ')} }`];
+    weak = true;
   } else {
     return { reason: 'no usage evidence' };
   }
