@@ -269,3 +269,48 @@ function has(o: any) { return 'foo' in o; }
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
+
+// --- B-tier evidence: structural signals, medium risk ---
+
+test('for-of target infers an iterable even without a call-site source', () => {
+  const output = inferTs(`
+function fo(x: any) { for (const v of x) void v; }
+`);
+  assert.match(output, /x: (unknown\[\]|Iterable<unknown>)/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('array destructuring infers an array source', () => {
+  const output = inferTs(`
+function d(x: any) { const [a, b] = x; return a; }
+`);
+  assert.match(output, /x: (unknown\[\]|Iterable<unknown>)/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('object destructuring infers an object shape on the source', () => {
+  const output = inferTs(`
+function d(x: any) { const { foo, bar } = x; return foo; }
+`);
+  assert.match(output, /x: \{ (bar|foo): unknown; (bar|foo): unknown; \}/);
+});
+
+test('await operand infers a thenable', () => {
+  const output = inferTs(`
+async function a(x: any) { return await x; }
+`);
+  assert.match(output, /x: (PromiseLike<unknown>|Promise<unknown>|unknown)/);
+  assert.doesNotMatch(output, /x: any/);
+});
+
+test('logical fallback and ternary branches infer a union', () => {
+  const output = inferTs(`
+function fb(x: any) { return x || 'fallback'; }
+function tern(x: any) { return true ? x : 42; }
+`);
+  assert.match(output, /x: string/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});

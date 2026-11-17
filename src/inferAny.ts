@@ -806,6 +806,64 @@ function constraintsFromReference(
       addSource(evidence, typeofLiteralToType(binary.right.text));
     }
   }
+
+  // `for (const v of x)` -> x must be iterable. `unknown[]` is the strict-safe
+  // stand-in (its elements are the loop variable's type).
+  if (ts.isForOfStatement(parent) && parent.expression === reference) {
+    addConstraint(evidence, 'unknown[]');
+  }
+
+  // Destructuring: `const [a, b] = x` -> x is array-like; `const { foo } = x`
+  // -> x has those properties (a synthesized object shape, as a weak source).
+  if (
+    ts.isVariableDeclaration(parent) &&
+    parent.initializer === reference &&
+    ts.isArrayBindingPattern(parent.name)
+  ) {
+    addConstraint(evidence, 'unknown[]');
+  }
+  if (
+    ts.isVariableDeclaration(parent) &&
+    parent.initializer === reference &&
+    ts.isObjectBindingPattern(parent.name)
+  ) {
+    for (const element of parent.name.elements) {
+      const keyNode = element.propertyName ?? element.name;
+      if (ts.isIdentifier(keyNode) || ts.isStringLiteral(keyNode) || ts.isNumericLiteral(keyNode)) {
+        const key = keyNode.text;
+        if (!evidence.properties.has(key)) {
+          evidence.properties.set(key, 'unknown');
+        }
+      }
+    }
+  }
+
+  // `await x` -> x is thenable. It is a constraint, not a source: `await` also
+  // accepts plain values, but a binding seen only here is most likely a
+  // Promise, and a concrete source still overrides this.
+  if (ts.isAwaitExpression(parent) && parent.expression === reference) {
+    addConstraint(evidence, 'PromiseLike<unknown>');
+  }
+
+  // `x || fallback` / `x ?? fallback` -> the fallback's type is an observed
+  // value for x (a common "default value" idiom, so x likely shares it).
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.left === reference &&
+    (parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+      parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
+  ) {
+    addSource(evidence, typeText(ctx, parent.right));
+  }
+
+  // `cond ? x : other` -> the other branch's type is a possible value for x.
+  if (ts.isConditionalExpression(parent)) {
+    if (parent.whenTrue === reference) {
+      addSource(evidence, typeText(ctx, parent.whenFalse));
+    } else if (parent.whenFalse === reference) {
+      addSource(evidence, typeText(ctx, parent.whenTrue));
+    }
+  }
 }
 
 type MutationKind = 'collection' | 'map' | 'set';
