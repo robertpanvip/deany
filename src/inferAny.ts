@@ -498,13 +498,20 @@ function constraintsFromReference(
 
   // A binding passed as an argument must be assignable to the parameter type.
   // This is a contravariant constraint; multiple such constraints intersect.
+  // If the parameter itself was `any` and inferred from its body (e.g. via
+  // `typeof` narrowing), prefer that inferred type — it lives in the
+  // `declarations` table keyed by the parameter node. `symbolTypeText` alone
+  // would see the raw `any` and route to the callee's *return* table instead.
   if (ts.isCallExpression(parent)) {
     const index = parent.arguments.indexOf(reference);
     if (index >= 0) {
       const signature = ctx.checker.getResolvedSignature(parent);
       const parameter = signature?.getParameters()[index];
       if (parameter !== undefined) {
-        addConstraint(evidence, symbolTypeText(ctx, parameter, parent));
+        const parameterDecl = parameter.valueDeclaration ?? parameter.declarations?.[0];
+        const inferred =
+          parameterDecl === undefined ? undefined : ctx.table.declarations.get(parameterDecl);
+        addConstraint(evidence, inferred ?? symbolTypeText(ctx, parameter, parent));
       }
     }
   }

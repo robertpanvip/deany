@@ -248,3 +248,96 @@ test('propagates an inferred return type across file boundaries', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('infers an any parameter union from typeof narrowing in the body', () => {
+  const { output } = infer(`
+function format(x: any) {
+  if (typeof x === 'string') return x.length;
+  if (typeof x === 'number') return x.toFixed();
+}
+`);
+  assert.match(output, /function format\(x: \(number \| string\)\)/);
+});
+
+test('back-propagates an inferred parameter type to an any call-site argument', () => {
+  const { output } = infer(`
+function format(x: any) {
+  if (typeof x === 'string') return 1;
+  if (typeof x === 'number') return 2;
+}
+let value: any;
+format(value);
+`);
+  assert.match(output, /let value: \(number \| string\);/);
+});
+
+test('back-propagation converges regardless of declaration order', () => {
+  const { output } = infer(`
+let value: any;
+format(value);
+function format(x: any) {
+  if (typeof x === 'string') return 1;
+  if (typeof x === 'number') return 2;
+}
+`);
+  assert.match(output, /let value: \(number \| string\);/);
+  assert.match(output, /function format\(x: \(number \| string\)\)/);
+});
+
+test('typeof narrowing propagates through a chained any variable', () => {
+  const { output } = infer(`
+function format(x: any) {
+  if (typeof x === 'string') return 1;
+  if (typeof x === 'number') return 2;
+}
+let value: any;
+format(value);
+let copy: any = value;
+`);
+  assert.match(output, /let copy: \(number \| string\) = value;/);
+});
+
+test('multiple call-site constraints intersect with the inferred parameter type', () => {
+  const { output } = infer(`
+function format(x: any) {
+  if (typeof x === 'string') return 1;
+  if (typeof x === 'number') return 2;
+}
+function onlyString(s: string) { return 0; }
+let value: any;
+format(value);
+onlyString(value);
+`);
+  assert.match(output, /let value: string;/);
+});
+
+test('does not infer a parameter type when the body has no typeof narrowing', () => {
+  const { output } = infer(`
+function identity(x: any) { return x; }
+let value: any;
+identity(value);
+`);
+  assert.match(output, /function identity\(x: any\)/);
+  assert.match(output, /let value: any;/);
+});
+
+test('back-propagates typeof narrowing across file boundaries', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'infer-param-cross-'));
+  const a = path.join(directory, 'a.ts');
+  const b = path.join(directory, 'b.ts');
+  fs.writeFileSync(
+    a,
+    `export function format(x: any) { if (typeof x === 'string') return 1; if (typeof x === 'number') return 2; }\n`,
+    'utf8',
+  );
+  fs.writeFileSync(b, `import { format } from './a.js';\nexport let value: any;\nformat(value);\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([a, b], compilerOptions);
+    const producer = results.find((result) => result.fileName === a);
+    const consumer = results.find((result) => result.fileName === b);
+    assert.match(producer?.output ?? '', /function format\(x: \(number \| string\)\)/);
+    assert.match(consumer?.output ?? '', /let value: \(number \| string\);/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

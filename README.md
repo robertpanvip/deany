@@ -83,6 +83,20 @@ export const snapshot: any = load();          // → number（反查 load 的推
 export const alias: any = snapshot;           // → number（再反查 snapshot）
 ```
 
+**从 `typeof` 收窄反推参数与调用点**：函数的 `any` 参数会从函数体里的 `typeof x === '...'` 分支推断出可能取值的联合；这个结果还会**反向传播给传入它的 `any` 实参**（与「返回值 → 接住变量」形成镜像），并继续沿链式 / 跨文件传播。声明顺序无关，靠多轮迭代收敛：
+
+```ts
+function format(x: any) {                       // x → number | string（来自两个 typeof 分支）
+  if (typeof x === 'string') return 1;
+  if (typeof x === 'number') return 2;
+}
+let value: any;
+format(value);                                  // value → number | string（反推调用点实参）
+let copy: any = value;                          // copy → number | string（继续链式传播）
+```
+
+若调用点实参本身有更直接的证据（如初始化器），以该证据为准；约束仅在其缺失时用于推断。函数体没有 `typeof` 等收窄信息时，参数不会被臆测为具体类型。
+
 `infer-any` 与 JS 隐式 any 反推（`createUsageResolver`）共用这套迭代引擎。推断结果只增不改（一旦确定就固定），最多 16 轮，实测大型项目（lodash 单文件 579KB / async 102 文件）均在 1 秒内完成。
 
 **嵌套 any 槽位投影**：推断表存的是「整个声明的值类型」，但替换时只把 `any` 所在的那一个槽位投影出来，避免双重包装：
@@ -224,7 +238,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 63 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、回调参数与真实项目回归）
+npm test            # 70 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof 收窄反推、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
