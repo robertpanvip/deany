@@ -458,6 +458,13 @@ export function convertSource(
     ) {
       return;
     }
+    // A catch binding may only be annotated `any` / `unknown` in TypeScript
+    // (TS1196). Inferring an object shape from `err.message` etc. and writing it
+    // here would be illegal, so leave catch variables untouched (they default
+    // to `unknown` under strict / useUnknownInCatchVariables).
+    if (node.parent !== undefined && ts.isCatchClause(node.parent)) {
+      return;
+    }
     let type = doc === undefined ? undefined : typeForTaggedDeclaration(doc, options);
     if (type === undefined) {
       type = resolver?.infer(node);

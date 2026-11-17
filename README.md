@@ -260,7 +260,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 99 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
+npm test            # 103 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、typeof function 合法化、catch 变量注解规避、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
@@ -292,10 +292,20 @@ npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
 - 变量初始化器为函数时，不再同时给绑定加一份来自 checker 的函数类型注解（此前与函数本身的注解各写一份、归一化不同，触发 `TS2322` / `TS2355`）；改为只标注函数，由 TS 推导绑定类型。
 - `instanceof` 推断泛型类（`Map` / `Set` 等）时用实例化后的类型，并把悬空类型参数与 `any` 槽位归一为 `unknown`（`Set<T>` → `Set<unknown>`，消除 `TS2304`）。
 
+第三轮用另一批无 JSDoc 的小库（mimic-fn / kind-of / xtend / object-assign / is-plain-object / escape-string-regexp / p-try / is-buffer）做了隐式 any 反推验证，据此修复：
+
+- `typeof x === 'function'` 曾把非法类型 `function` 直接写回注解（不是合法 TS 类型名）；现映射为 `Function`（strict 下可调用、可访问 `.name`/`.prototype`，也能接 `Function` 值）。
+- catch 子句变量曾从 `err.message` 等推断出对象形状并写回注解，触发 `TS1196`（catch 变量只允许 `any`/`unknown`）；现跳过，保留默认 `unknown`。
+- 内置 API 的对象参数槽位（`Object.defineProperty` / `Reflect.*` 等）即使 `lib.d.ts` 把形参写成 `any`/`T`/`{}` 也能反推出 `object` 约束（见上文「证据来源」）。
+
 仍存在的局限（属于"JS 动态模式 → strict TS"的固有难度，非语法 bug）：
 
 - `unknown` 参与运算/索引/赋值会触发 `TS18046/TS2345/TS2322`；函数内 `this` 触发 `TS2683`。这些需按具体业务补类型或用 `infer-any` 进一步收窄。例如 p-limit 里 `require('yocto-queue')` 的结果、`typeof` 收窄存进变量（`var type = typeof val`）后无法跨变量收窄，都会留下 `unknown`。
 - 递归函数（如 fast-deep-equal 的 `equal(a, b)`）的参数若被推断为较窄的联合/对象类型，递归调用把联合成员（`Map` 的值 `unknown`）再传回参数时会触发 `TS2345`——类型推断无法预知递归数据流，属固有限制。
 - 回调参数的上游若已是 `any` / `unknown`（如 `anyArray.map(x => ...)`），其上下文类型为 `any`，此时回调参数保持原样——标注它无法修复上游已丢失的类型，属于 unknown 传播问题。
 - 跨文件推断把自定义类型（如 `Mixed`）传播到使用点时，使用点文件可能缺少对应兜底别名（该类型只定义在别的文件 JSDoc 中）。
+- `Object.getOwnPropertyDescriptor` 等 lib API 的返回类型含 `| undefined`（如 `PropertyDescriptor | undefined`），JS 库常直接传给 `Object.defineProperty` 而不判空——工具不臆造非空断言，保留 strict 报错需业务补 `!` 或判空（如 mimic-fn）。
+- 参数被推断为窄对象/数组类型后，`unknown` 实参传入会触发 `TS2345`，收窄到 `never` 后访问属性触发 `TS2339`（如 kind-of 的类型探测函数）；把 `val` 保守推成 `unknown`/`{}` 是安全的，但无法同时满足下游对具体类型（`Date` / `Error` / `RegExp`）的期待。
+- `for...in` 右侧若为 `unknown` 触发 `TS2407`、用 `string` 索引 `{}` 触发 `TS7053`（如 object-assign / xtend 的对象拷贝）——推断不出具体键集合时保持 `unknown`，属保守策略。
+- 顶层 `var toString` 与 lib 全局 `toString` 同名会触发 `TS2300`（如 kind-of）——该文件无 import/export 被 TS 当全局脚本，加 `export {}` 转为模块即可规避，非推断错误。
 - `window` / `document` / `define` 等运行时全局依赖目标 lib / 环境声明，不由转换器兜底。

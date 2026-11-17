@@ -479,6 +479,20 @@ function isArrayIsArrayCall(call: ts.CallExpression): boolean {
 }
 
 /**
+ * Map a `typeof` result string to a legal, strict-safe TypeScript type.
+ * `typeof x === 'function'` is the notable trap: `function` is a keyword, not
+ * a type name, so writing it back produces invalid syntax. Most other results
+ * (`string`, `number`, `boolean`, `symbol`, `bigint`, `undefined`, `object`)
+ * are already legal type keywords.
+ */
+function typeofLiteralToType(literal: string): string {
+  if (literal === 'function') {
+    return 'Function';
+  }
+  return literal;
+}
+
+/**
  * Built-in APIs whose parameter slots semantically require an object even
  * though their `lib.d.ts` signatures type the slot as `any` or a bare generic
  * `T` (e.g. `Object.defineProperty<T>(o: T, ...)`). Passing an `any` binding
@@ -686,10 +700,12 @@ function constraintsFromReference(
   }
 
   if (ts.isTypeOfExpression(parent)) {
-    // `typeof x === 'string'` is a useful hint but not authoritative.
+    // `typeof x === 'string'` is a useful hint but not authoritative. Some
+    // `typeof` result strings are not legal TypeScript type names (`function`
+    // in particular), so map them to a strict-safe equivalent before recording.
     const binary = parent.parent;
     if (ts.isBinaryExpression(binary) && ts.isStringLiteral(binary.right)) {
-      addSource(evidence, binary.right.text);
+      addSource(evidence, typeofLiteralToType(binary.right.text));
     }
   }
 }
