@@ -523,6 +523,24 @@ function typeofLiteralToType(literal: string): string {
  */
 const INDEXABLE_OBJECT = 'Record<PropertyKey, unknown>';
 
+/** Bitwise operators coerce both operands to int32 in JavaScript. */
+const BITWISE_OPERATORS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.AmpersandToken,
+  ts.SyntaxKind.BarToken,
+  ts.SyntaxKind.CaretToken,
+  ts.SyntaxKind.LessThanLessThanToken,
+  ts.SyntaxKind.GreaterThanGreaterThanToken,
+  ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken,
+]);
+
+/** Relational operators only accept orderable primitives (number/string). */
+const RELATIONAL_OPERATORS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.LessThanToken,
+  ts.SyntaxKind.GreaterThanToken,
+  ts.SyntaxKind.LessThanEqualsToken,
+  ts.SyntaxKind.GreaterThanEqualsToken,
+]);
+
 /**
  * Built-in APIs whose parameter slots semantically require an object even
  * though their `lib.d.ts` signatures type the slot as `any` or a bare generic
@@ -747,6 +765,23 @@ function constraintsFromReference(
     (parent.left === reference || parent.right === reference)
   ) {
     addSource(evidence, arithmeticNumberType(ctx, parent));
+    // Any bitwise operator coerces both operands to int32, so an operand seen
+    // in `x | 0`, `x & y`, `x << 2` etc. is definitely numeric.
+    if (BITWISE_OPERATORS.has(parent.operatorToken.kind)) {
+      addSource(evidence, 'number');
+    }
+    // Relational comparisons only apply to orderable primitives (number or
+    // string); equality is excluded since any two types may be compared.
+    if (RELATIONAL_OPERATORS.has(parent.operatorToken.kind)) {
+      addSource(evidence, 'number | string');
+    }
+    // `key in x` requires x to be an object (the left side is the key).
+    if (
+      parent.operatorToken.kind === ts.SyntaxKind.InKeyword &&
+      parent.right === reference
+    ) {
+      addSource(evidence, 'object');
+    }
   }
 
   if (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) {
@@ -754,7 +789,9 @@ function constraintsFromReference(
       parent.operator === ts.SyntaxKind.PlusPlusToken ||
       parent.operator === ts.SyntaxKind.MinusMinusToken ||
       parent.operator === ts.SyntaxKind.PlusToken ||
-      parent.operator === ts.SyntaxKind.MinusToken
+      parent.operator === ts.SyntaxKind.MinusToken ||
+      // `~x` coerces x to int32 (same guarantee as binary bitwise operators).
+      parent.operator === ts.SyntaxKind.TildeToken
     ) {
       addSource(evidence, 'number');
     }
@@ -867,8 +904,11 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
   if (
     ts.isVariableDeclaration(owner) ||
     ts.isPropertyDeclaration(owner) ||
-    ts.isPropertySignature(owner)
+    ts.isPropertySignature(owner) ||
+    ts.isParameter(owner)
   ) {
+    // A default value (`function f(x = 5)`) is an observed value for the
+    // binding, just like a variable initializer.
     if ('initializer' in owner && owner.initializer !== undefined) {
       addSource(evidence, typeText(ctx, owner.initializer));
     }

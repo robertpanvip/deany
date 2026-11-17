@@ -226,3 +226,46 @@ function probe() {
   assert.match(output, /wrapped: String/);
   assert.doesNotMatch(output, /wrapped: any/);
 });
+
+// --- A-tier evidence: strong signals, low risk ---
+
+test('a parameter default value infers the parameter type', () => {
+  const output = inferTs(`
+function f(x: any = 5) { return x; }
+`);
+  assert.match(output, /x: number = 5/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('bitwise operators infer a numeric operand', () => {
+  const output = inferTs(`
+function trunc(x: any) { return x | 0; }
+function flip(y: any) { return ~y; }
+function shift(a: any, b: any) { return a << b; }
+`);
+  assert.match(output, /x: number/);
+  assert.match(output, /y: number/);
+  assert.match(output, /a: number/);
+  assert.match(output, /b: number/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('relational comparison infers number or string operands', () => {
+  const output = inferTs(`
+function gt(x: any) { return x > 10; }
+function lt(y: any) { return y < 'z'; }
+`);
+  assert.match(output, /x: \(?number \| string\)?/);
+  assert.match(output, /y: \(?number \| string\)?/);
+});
+
+test('the right operand of the in operator infers an object', () => {
+  const output = inferTs(`
+function has(o: any) { return 'foo' in o; }
+`);
+  assert.match(output, /o: object/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
