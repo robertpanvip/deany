@@ -107,6 +107,17 @@ function handle(x: any) {              // x → Box | unknown[]
 
 若调用点实参本身有更直接的证据（如初始化器），以该证据为准；约束仅在其缺失时用于推断。函数体没有任何收窄信息（`typeof` / `isArray` / `instanceof`）时，参数不会被臆测为具体类型。
 
+**弱证据的二次精化**：从「方法调用 / 属性访问」合成的对象形状（`{ toFixed: fn }`）属于弱证据，会先临时定型；如果调用点实参在后续轮次推断出了更具体的类型，参数会被**精化**为该具体类型（number 自带 `toFixed`，天然满足这个形状）：
+
+```ts
+function format(x: any) { return x.toFixed(2); }  // 先推成 { toFixed: fn }
+let value: any = 42;
+format(value);                                     // value → number
+// 二次精化后 format 的 x → number（而非宽泛的对象形状）
+```
+
+强证据（初始化器、赋值、实参、`typeof`/守卫收窄、返回值传播）一旦确定就固定；只有弱证据形状保持可变、等待精化。没有任何具体证据时，才保留方法形状。
+
 `infer-any` 与 JS 隐式 any 反推（`createUsageResolver`）共用这套迭代引擎。推断结果只增不改（一旦确定就固定），最多 16 轮，实测大型项目（lodash 单文件 579KB / async 102 文件）均在 1 秒内完成。
 
 **嵌套 any 槽位投影**：推断表存的是「整个声明的值类型」，但替换时只把 `any` 所在的那一个槽位投影出来，避免双重包装：
@@ -248,7 +259,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 82 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、方法调用推断对象形状、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、回调参数与真实项目回归）
+npm test            # 87 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、方法形状与弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check

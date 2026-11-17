@@ -448,3 +448,54 @@ setup(value);
 `);
   assert.match(output, /let value: \{ for: \(\.\.\.args: unknown\[\]\) => unknown; \}/);
 });
+
+test('refines a method-shape parameter to a concrete type inferred at the call site', () => {
+  const { output } = infer(`
+function format(x: any) { return x.toFixed(2); }
+let value: any = 42;
+format(value);
+`);
+  // value is inferred as number from its initializer in round 1; round 2
+  // refines format's parameter from the weak { toFixed: fn } shape to number.
+  assert.match(output, /function format\(x: number\)/);
+  assert.match(output, /let value: number = 42;/);
+});
+
+test('refines a method-shape parameter from assignment evidence at the call site', () => {
+  const { output } = infer(`
+function format(x: any) { return x.toFixed(2); }
+let value: any;
+value = 42;
+format(value);
+`);
+  assert.match(output, /function format\(x: number\)/);
+  assert.match(output, /let value: number;/);
+});
+
+test('refines a method-shape parameter to a user class instance', () => {
+  const { output } = infer(`
+class W { toFixed(n: number) { return '' + n; } }
+function format(x: any) { return x.toFixed(2); }
+let value: any = new W();
+format(value);
+`);
+  assert.match(output, /function format\(x: W\)/);
+});
+
+test('propagates a refined parameter type through a chained variable', () => {
+  const { output } = infer(`
+function format(x: any) { return x.toFixed(2); }
+let value: any = 42;
+format(value);
+let copy: any = value;
+`);
+  assert.match(output, /function format\(x: number\)/);
+  assert.match(output, /let copy: number = value;/);
+});
+
+test('keeps the method shape when the call-site argument has no concrete evidence', () => {
+  const { output } = infer(`
+function format(x: any) { return x.toFixed(2); }
+`);
+  assert.match(output, /function format\(x: \{ toFixed: \(\.\.\.args: unknown\[\]\) => unknown; \}\)/);
+});

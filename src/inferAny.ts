@@ -271,10 +271,12 @@ function widenedTypeText(checker: ts.TypeChecker, type: ts.Type, node: ts.Node):
 interface InferenceTable {
   readonly declarations: Map<ts.Node, string>;
   readonly returns: Map<ts.Node, string>;
+  /** Owners inferred only from weak (property-shape) evidence; re-evaluated. */
+  readonly weakOwners: Set<ts.Node>;
 }
 
 function createTable(): InferenceTable {
-  return { declarations: new Map(), returns: new Map() };
+  return { declarations: new Map(), returns: new Map(), weakOwners: new Set() };
 }
 
 interface InferenceContext {
@@ -824,10 +826,18 @@ function intersectConstraints(constraints: readonly string[]): string[] | undefi
  * no source evidence — otherwise incidental accesses like `arr.push` on an
  * already-typed array would pollute the inferred type.
  */
-function mergeEvidence(evidence: Evidence): { type?: string; reason?: string } {
+function mergeEvidence(evidence: Evidence): {
+  type?: string;
+  reason?: string;
+  weak?: boolean;
+} {
   const sources = [...new Set(evidence.sources.flatMap(splitTopLevelUnion))];
   const allowed = intersectConstraints(evidence.constraints);
   let members: string[];
+  // A shape synthesized purely from accessed properties is weak evidence: a
+  // later round may find a concrete type (e.g. a call-site argument) that is
+  // more precise and should replace it.
+  let weak = false;
 
   if (sources.length > 0) {
     // Observed values are authoritative; constraints may narrow them.
@@ -845,6 +855,7 @@ function mergeEvidence(evidence: Evidence): { type?: string; reason?: string } {
       return `${key}: ${type};`;
     });
     members = [`{ ${fields.join(' ')} }`];
+    weak = true;
   } else {
     return { reason: 'no usage evidence' };
   }
@@ -855,11 +866,11 @@ function mergeEvidence(evidence: Evidence): { type?: string; reason?: string } {
   }
   if (members.length === 1) {
     const only = members[0];
-    return only === undefined ? { reason: 'no usage evidence' } : { type: only };
+    return only === undefined ? { reason: 'no usage evidence' } : { type: only, weak };
   }
   // A bare function type is illegal as a union member without parentheses.
   const formatted = members.map((member) => (hasTopLevelArrow(member) ? `(${member})` : member));
-  return { type: formatted.join(' | ') };
+  return { type: formatted.join(' | '), weak };
 }
 
 /**
@@ -944,23 +955,39 @@ function ownerType(table: InferenceTable, owner: ts.Node): string | undefined {
 
 /**
  * Fixed-point iteration: infer types for every owner and feed each result back
- * into the table so chained declarations resolve. Once an owner has a concrete
- * type it is fixed; a type is only stored when usage evidence is conclusive.
- * Converges in at most `owners.length` rounds; capped defensively.
+ * into the table so chained declarations resolve. Strong evidence fixes a type
+ * permanently; weak evidence (an object shape synthesized from property
+ * accesses alone) stays provisional and is re-evaluated each round, so a later
+ * concrete type — e.g. a call-site argument that itself was inferred in a
+ * previous round — can refine it. Converges in at most MAX_ROUNDS rounds.
  */
 function buildInferenceTable(owners: readonly ts.Node[], ctx: InferenceContext): InferenceTable {
   const MAX_ROUNDS = 16;
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
     let changed = false;
     for (const owner of owners) {
-      if (ownerType(ctx.table, owner) !== undefined) {
+      const current = ownerType(ctx.table, owner);
+      const wasWeak = ctx.table.weakOwners.has(owner);
+      // Strongly inferred owners are fixed. Weak ones stay open to refinement.
+      if (current !== undefined && !wasWeak) {
         continue;
       }
       const merged = mergeEvidence(collectEvidence(owner, ctx));
-      if (merged.type !== undefined) {
-        setOwnerType(ctx.table, owner, merged.type);
-        changed = true;
+      if (merged.type === undefined) {
+        continue;
       }
+      const isWeak = merged.weak === true;
+      const sameType = current === merged.type;
+      if (sameType && isWeak === wasWeak) {
+        continue;
+      }
+      setOwnerType(ctx.table, owner, merged.type);
+      if (isWeak) {
+        ctx.table.weakOwners.add(owner);
+      } else {
+        ctx.table.weakOwners.delete(owner);
+      }
+      changed = true;
     }
     if (!changed) {
       break;
