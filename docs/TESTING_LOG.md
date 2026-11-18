@@ -264,6 +264,17 @@
 - **验证**：真实样例 `calc.js`+`calc.d.ts`（无 JSDoc）→ `add(a:number,b:number):number`/`VERSION:string`，strict 通过；泛型 `wrap<T>(value:T):T[]`；interface 合并；d.ts 覆盖 JSDoc（`string`→`number`）、`--no-dts` 回退；class 方法字段。测试 `test/dts.test.ts` 5 项 + 全套 **181/181 全绿**，typecheck/build 通过。
 - **已知边界**：d.ts 只覆盖公共 API，函数体内部局部变量仍靠 JSDoc/usage；同名 d.ts 之外不读取 import 的第三方 d.ts；`noUncheckedIndexedAccess` 下 JS 实现体原有的索引访问告警（`items[i]` → `T | undefined`）是实现本身问题，不在 d.ts 合并范围。
 
+## TypeScript 6.x 兼容（用户要求，本轮实现）
+
+- **需求**：用户希望 deany 支持 TS6（「更接近以后的语义」），不再锁死 TS5。锁定调查后确认：TS7 因 `ts.TypeFormatFlags` 等导出形态变化会在 import 期崩溃（此前已加 bin 守卫拒绝），TS6 无此问题。
+- **差异点**：TS6 的 `createCompilerHost` **不再自动加载 `@types/*`**（TS5.9 会）。表现为含 Node 全局（`module`/`require`/`process`/`node:fs`/`NodeJS.*`）的转换输出在 `--check` 下误报 TS2591/TS2304/TS2503。d.ts 还原功能本身在 TS6 下签名断言全过，非功能缺陷。
+- **修复**（两阶段，对 TS5.9 零副作用）：
+  1. `src/check.ts` 抽出 `collectDiagnostics`；首轮检查若出现 Node 全局缺失诊断（码 2304/2503/2580/2591 + 消息含 `module|require|process|…|NodeJS`），且 `types` 未显式指定、`resolveTypeReferenceDirective('node', file)` 能从被检文件位置解析到 `@types/node`，则注入 `types: ['node']` 重检一次。
+  2. `tsconfig.json` 加 `"types": ["node"]`，让 deany 自身源码在 TS6 下 `build`/`typecheck` 通过。
+  3. peer 放宽 `>=5.4 <6` → `>=5.4 <7`；两个 bin 守卫 `major >= 6` → `major >= 7 || major < 5`，TS6 放行、TS7/TS4 及更低仍友好拒绝。
+- **验证**：临时目录强制装 `typescript@6.0.3` → build 通过、test **181/181**、CLI 守卫放行、真实转换 + d.ts 还原 + `--check` 全绿；同代码换回 TS5.9.3 → 181/181（对照）。新增回归测试 `checkStrict accepts Node globals emitted verbatim from JS`，反证：换回旧 check.ts 后该用例在 TS6 下精确变红、修复后转绿。工作区 TS5.9 全套 182/182 + typecheck/build 通过。
+- **诚实兜底**：无 JSDoc/无 d.ts 时 `add(a,b)` 推不出 → `unknown`，`unknown + unknown` 在 strict 下仍报 TS18046——这是「不臆测」原则的正确表现，非回归（两版本一致）。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。

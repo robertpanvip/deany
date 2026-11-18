@@ -21,25 +21,51 @@ function formatDiagnostic(diagnostic: ts.Diagnostic): string {
  * Type-check generated TypeScript in memory under full `strict` mode.
  * No files are written, so this is safe to use as a conversion gate.
  */
-export function checkStrict(
+/**
+ * Diagnostics that indicate a missing ambient/global type rather than a real
+ * error in the generated code. TypeScript 6 stopped auto-including every
+ * `@types/*` package, so Node globals (`module`, `require`, `process`,
+ * `NodeJS.*`) are no longer visible unless `@types/node` is referenced. deany
+ * emits those globals verbatim when converting Node JS, so treating them as
+ * errors would make the strict gate fail spuriously under TS6.
+ */
+const AMBIENT_MISSING_CODES = new Set<number>([
+  2304, // Cannot find name 'X'.
+  2503, // Cannot find namespace 'X'.
+  2580, // Cannot find name 'X'. Do you need to install type definitions...
+  2591, // Cannot find name 'X'. Do you need to install @types/node...
+]);
+
+function mentionsNodeGlobal(diagnostic: ts.Diagnostic): boolean {
+  if (!AMBIENT_MISSING_CODES.has(diagnostic.code)) {
+    return false;
+  }
+  const text = ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n');
+  return /\b(module|require|process|global|Buffer|__dirname|__filename|NodeJS)\b/.test(text);
+}
+
+/** Try to resolve `@types/node` from the checked file's location. */
+function hasNodeTypes(fileName: string, options: ts.CompilerOptions): boolean {
+  try {
+    const resolved = ts.resolveTypeReferenceDirective(
+      'node',
+      fileName,
+      options,
+      ts.sys,
+    );
+    return (
+      resolved?.resolvedTypeReferenceDirective?.resolvedFileName !== undefined
+    );
+  } catch {
+    return false;
+  }
+}
+
+function collectDiagnostics(
   fileName: string,
   output: string,
-  extraOptions: ts.CompilerOptions = {},
-): CheckResult {
-  const options: ts.CompilerOptions = {
-    strict: true,
-    noEmit: true,
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    lib: ['lib.es2022.d.ts'],
-    skipLibCheck: true,
-    noUncheckedIndexedAccess: true,
-    noImplicitOverride: true,
-    noFallthroughCasesInSwitch: true,
-    ...extraOptions,
-  };
-
+  options: ts.CompilerOptions,
+): readonly ts.Diagnostic[] {
   const resolved = ts.sys.resolvePath(fileName);
   const host = ts.createCompilerHost(options);
   const baseGetSourceFile = host.getSourceFile.bind(host);
@@ -62,9 +88,42 @@ export function checkStrict(
   // host serves exactly one source file, so identity is both precise and
   // platform-independent.
   const target = program.getSourceFile(resolved);
-  const diagnostics = ts
+  return ts
     .getPreEmitDiagnostics(program)
     .filter((diagnostic) => diagnostic.file === undefined || diagnostic.file === target);
+}
+
+export function checkStrict(
+  fileName: string,
+  output: string,
+  extraOptions: ts.CompilerOptions = {},
+): CheckResult {
+  const options: ts.CompilerOptions = {
+    strict: true,
+    noEmit: true,
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    lib: ['lib.es2022.d.ts'],
+    skipLibCheck: true,
+    noUncheckedIndexedAccess: true,
+    noImplicitOverride: true,
+    noFallthroughCasesInSwitch: true,
+    ...extraOptions,
+  };
+
+  let diagnostics = collectDiagnostics(fileName, output, options);
+  // TS6+ no longer auto-includes @types/*. If the only failures are missing
+  // Node globals and @types/node is resolvable from this file, retry once with
+  // it explicitly referenced. Under TS5.9 the first pass already sees these
+  // globals, so this branch is a no-op there.
+  if (
+    diagnostics.some(mentionsNodeGlobal) &&
+    options.types === undefined &&
+    hasNodeTypes(ts.sys.resolvePath(fileName), options)
+  ) {
+    diagnostics = collectDiagnostics(fileName, output, { ...options, types: ['node'] });
+  }
 
   return {
     ok: diagnostics.length === 0,

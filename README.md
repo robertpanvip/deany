@@ -8,6 +8,8 @@
 
 ## 安装
 
+需要 TypeScript 作为 peer 依赖，支持 **5.4 ~ 6.x**（TS7 因模块导出形态变化暂不支持，CLI 会给出友好提示）：
+
 ```bash
 npm install
 npm run build

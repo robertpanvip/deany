@@ -1,6 +1,6 @@
 {
   "name": "@deany/core",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Infer strict TypeScript types from JSDoc and real usage evidence, eliminating any/implicit-any so code is ready for scriptc / tsc --strict.",
   "type": "module",
   "bin": {
@@ -39,7 +39,7 @@
   ],
   "license": "Apache-2.0",
   "peerDependencies": {
-    "typescript": ">=5.4 <6"
+    "typescript": ">=5.4 <7"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
