@@ -287,6 +287,14 @@
 
 **验证**：新增 4 个回归测试（P2/P3 在 `normalize.test.ts`、P4/P5 在 `inferAny.test.ts`），全套 **186/186 全绿**，typecheck/build 通过。
 
+## 扩充 152 项复测 + P6 修复（本轮实现）
+
+来源：独立于上一轮 60 项报告的扩充轮，共 152 项（143 通过 / 9 失败），归并为 6 问题。在本仓库按清单复现代码逐条验证：
+
+- **P1/P2/P3/P4/P5（上一轮已修，本轮复现确认通过）**：README 导入路径、options 默认值、联合中 `function()` 归一化、`--assertions` 生效、TS2454 definite-assignment `!` 均按预期工作。P3 的 `checkStrict` 现在报 TS2322（样例 JSDoc 返回类型与 `return 1` 不符，属正确类型检查）而非原 TS8020 非法语法。
+- **P6（本轮新发现，真实存在并已修复）**：`const rec: Record<string, any> = { a: 1, b: 2 }` 被推断为 `Record<string, { a: number; b: number; }>` → TS2322。根因：`any` 在 Record 的 `[1]` 值槽位，而对象字面量初始化器被 checker 报告为整体形状（无 `<...>`），`projectSlotType` 无法投影、回退返回整个对象；Map/Array 的 wholeType 本身是泛型形式故不受影响。修复：`inferAny.ts` 新增 `recordValueSlotType`，识别 `Record`/`ReadonlyRecord` 值槽位 + 对象字面量初始化器，直接从字面量各属性值推断槽位类型（用既有 `mergeMutationEvidence` 联合去重），主循环投影处优先采用；不匹配时仍走原投影路径。结果 `Record<string, number>`，strict 通过。混合值、`ReadonlyRecord`、嵌套对象值均覆盖。
+- **验证**：新增 4 个回归测试（`test/inferAny.test.ts`），全套 **190/190 全绿**，typecheck/build 通过。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。

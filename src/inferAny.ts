@@ -225,6 +225,61 @@ function projectSlotType(fullType: string, path: readonly number[]): string {
   return current;
 }
 
+/**
+ * `Record<K, any>` / `ReadonlyRecord<K, any>` keep their *values* in the `any`
+ * slot. When the initializer is an object literal, the checker reports its
+ * whole shape (`{ a: number; b: number; }`), which has no type arguments and
+ * therefore cannot be projected through the `[1]` value-slot path. Projecting
+ * that shape would wrongly emit `Record<string, { a: number; b: number; }>`
+ * and raise TS2322 — each property value is a `number`, not the whole object.
+ *
+ * Derive the slot from the literal's own property values instead, aligned with
+ * how `Map<string, any>` slots are inferred from `set(k, v)`. Returns undefined
+ * unless the `any` is the value slot of a Record-like reference whose owner has
+ * an object-literal initializer, so the generic projection path still applies.
+ */
+function recordValueSlotType(
+  node: ts.Node,
+  owner: ts.Node,
+  ctx: InferenceContext,
+): string | undefined {
+  const parent = node.parent;
+  if (parent === undefined || !ts.isTypeReferenceNode(parent) || parent.typeArguments === undefined) {
+    return undefined;
+  }
+  const name = parent.typeName.getText();
+  if (name !== 'Record' && name !== 'ReadonlyRecord') {
+    return undefined;
+  }
+  if (parent.typeArguments.indexOf(node as ts.TypeNode) !== 1) {
+    return undefined;
+  }
+  if (!ts.isVariableDeclaration(owner) || owner.initializer === undefined) {
+    return undefined;
+  }
+  const init = owner.initializer;
+  if (!ts.isObjectLiteralExpression(init)) {
+    return undefined;
+  }
+  const valueTypes: string[] = [];
+  for (const prop of init.properties) {
+    let expr: ts.Expression | undefined;
+    if (ts.isPropertyAssignment(prop)) {
+      expr = prop.initializer;
+    } else if (ts.isShorthandPropertyAssignment(prop)) {
+      expr = prop.name;
+    }
+    if (expr === undefined) {
+      continue;
+    }
+    const type = typeText(ctx, expr);
+    if (type !== undefined && type !== 'any' && type !== 'unknown' && type !== 'never') {
+      valueTypes.push(type);
+    }
+  }
+  return mergeMutationEvidence(undefined, valueTypes);
+}
+
 function symbolOf(owner: ts.Node, checker: ts.TypeChecker): ts.Symbol | undefined {
   if (
     ts.isVariableDeclaration(owner) ||
@@ -2566,7 +2621,12 @@ export function inferAnyInProject(
           // The owner's inferred type describes the whole value. Project it
           // onto the position this `any` token actually occupies so nested
           // slots (`any[]`, `Array<any>`, `Map<K, any>`) are not double-wrapped.
-          const projected = wholeType === undefined ? undefined : projectSlotType(wholeType, slotPathOf(node));
+          // `Record<K, any>` is special: an object-literal initializer is
+          // reported as its whole shape, which cannot be projected through the
+          // value-slot path — derive the slot from the literal's values instead.
+          const recordSlot = recordValueSlotType(node, owner, ctx);
+          const projected =
+            recordSlot ?? (wholeType === undefined ? undefined : projectSlotType(wholeType, slotPathOf(node)));
           const usableProjected = projected !== 'never' ? projected : undefined;
           // For a mutable container slot, method calls that write into it
           // (`push`, `set`, `add`, index assignment) are covariant sources for

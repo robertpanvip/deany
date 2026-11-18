@@ -264,6 +264,31 @@ test('infers a Set element slot from add(value) mutations', () => {
   assert.doesNotMatch(output, /\bany\b/);
 });
 
+test('infers a Record value slot from an object-literal initializer, not the whole shape', () => {
+  const { output } = infer(`const rec: Record<string, any> = { a: 1, b: 2 };\n`);
+  assert.match(output, /const rec: Record<string, number>/);
+  assert.doesNotMatch(output, /Record<string, \{/);
+  assert.doesNotMatch(output, /\bany\b/);
+});
+
+test('unions mixed value types in a Record<string, any> initializer', () => {
+  const { output } = infer(`const rec: Record<string, any> = { a: 1, b: 'x' };\n`);
+  assert.match(output, /const rec: Record<string, \(?number \| string\)?>/);
+  assert.doesNotMatch(output, /\bany\b/);
+});
+
+test('infers a ReadonlyRecord value slot from an object-literal initializer', () => {
+  const { output } = infer(`const rec: ReadonlyRecord<string, any> = { a: 1, b: 2 };\n`);
+  assert.match(output, /const rec: ReadonlyRecord<string, number>/);
+  assert.doesNotMatch(output, /\bany\b/);
+});
+
+test('a Record value slot uses the property value type, not the initializer shape', () => {
+  const { output } = infer(`const rec: Record<string, any> = { a: { x: 1 } };\n`);
+  assert.match(output, /const rec: Record<string, \{ x: number; \}> = \{ a: \{ x: 1 \} \};/);
+  assert.doesNotMatch(output, /Record<string, \{ a:/);
+});
+
 test('does not treat read-only container accesses as element evidence', () => {
   const { output } = infer(`const a: any[] = [1]; console.log(a.length, a.map);\n`);
   assert.match(output, /const a: number\[\]/);
