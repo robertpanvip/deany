@@ -126,6 +126,30 @@
 
 **未修（固有限制/检查门槛）**：TS1501（正则 `v`/`s` flag，checkStrict 固定 ES2022 的门槛误报，产物与源码一致）、TS4114（class override）、缺依赖级联（TS2307）、`this` 隐式类型（TS2683）、回调/rest 动态参数。
 
+### 第四轮（随机抽中 which-typed-array / p-finally / slash）
+
+| 库 | 版本 | strict 诊断（原始 → 转换后） |
+| --- | --- | --- |
+| which-typed-array | 2.0.0 | 21 → 18（余下多为缺依赖 TS2307×6 + TS2578 冗余） |
+| p-finally | 2.0.0 | 1 → **0** |
+| slash | 5.1.0 | 1 → 1（单条 TS2322，regex 参数重载） |
+
+### 第五轮（随机抽中 p-reduce / is-arguments / p-finally）
+
+| 库 | 版本 | strict 诊断（原始 → 转换后 → 修复后） |
+| --- | --- | --- |
+| p-reduce | 3.1.0 | 4 → 3 → **2**（void 参数污染消除，余 2 条泛型/Symbol 固有限制） |
+| is-arguments | 1.2.0 | 2 → 4（缺依赖 `call-bound` + TS2306 模块解析 + 冗余 @ts-expect-error） |
+| p-finally | 2.0.0 | 1 → **0** |
+
+**本轮修复：函数 void 返回泄漏为值参数类型（p-reduce）**
+
+`const next = async total => { resolve(total); return; }; next(initialValue)` 中，`initialValue`/`total` 被推成 `void`——把值传给 void 参数在 strict 下报 TS2345/TS2322。根因：`a => { return; }` 无值 return 使函数返回推成 `void`（正确），但该 void 经固定点迭代通过「实参传参」的形参约束（`constraintsFromReference` 的 `addConstraint`）泄漏到值参数 owner；约束交集把值钉成 void。
+
+修复：`addConstraint` 丢弃 `void`/`Promise<void>` 约束——void 描述函数返回而非值，不应收窄值绑定；函数返回仍走 `addSource`（returns 表）不受影响。最小复现（`init`/`a`/`next(initialValue)`）参数从 void → unknown，TS2345 清零，函数返回 void 保留。实测 p-reduce 4→2（TS2345 消除）。`test/realLib.test.ts` 新增回归测试。**156/156 测试全绿**。
+
+**未修（固有限制）**：p-reduce 余 TS2571/TS2322 为 `Record<PropertyKey,unknown>` 上 `Symbol.iterator` 槽 unknown + 泛型 `Promise<any>` resolve 的深层限制，非臆测范围；is-arguments 的 TS2306/TS2307 为缺依赖与模块解析。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。

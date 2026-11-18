@@ -559,3 +559,19 @@ export function f({ a: renamed = 1, 'kebab-key': k = 'x', } = {}) {
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
+
+test('void return does not leak into value parameters (p-reduce next/initialValue)', () => {
+  const { output } = convertJs(`
+export function outer(init, reducer) {
+  const inner = a => { return; };
+  inner(init);
+  return reducer(init);
+}
+`);
+  assert.match(output, /function outer\(init: unknown, reducer:/);
+  assert.match(output, /\(a: unknown\): void =>/);
+  assert.doesNotMatch(output, /init: void/);
+  assert.doesNotMatch(output, /a: void/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
