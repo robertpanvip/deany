@@ -608,3 +608,33 @@ export function greet(options) {
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
+
+test('destructured binding member accesses fold into the source shape (delay signal)', () => {
+  // `const { signal } = opts` / `function f({ signal } = {})`: `signal`'s own
+  // member accesses are real evidence for the source object's shape. Without
+  // folding them in, `signal` collapses to `unknown` (TS2339/TS18046).
+  const { output } = convertJs(`
+export function f(opts = {}) {
+  const { signal } = opts;
+  if (signal?.aborted) return signal.reason;
+  signal?.addEventListener('abort', () => {});
+}
+`);
+  assert.match(output, /signal\?: \{ aborted: unknown; reason: unknown;/);
+  // The pattern itself must not get a hollow `: {}` that masks the folded shape.
+  assert.doesNotMatch(output, /const \{ signal \}: \{\}/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('destructured parameter member accesses fold into the parameter shape', () => {
+  const { output } = convertJs(`
+export function f({ signal } = {}) {
+  if (signal?.aborted) return signal.reason;
+  signal?.addEventListener('abort', () => {});
+}
+`);
+  assert.match(output, /\{ signal \}: \{ signal\?: \{ aborted: unknown; reason: unknown;/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});

@@ -190,6 +190,34 @@
 - **define-properties 的 `name: unknown`（第九轮）**：`name in obj` / `obj[name]` 的 key 被推 `unknown`（TS18046/TS2538）。实验：仅把 key 改 `PropertyKey` 只是把 TS2538 换成 TS7053（容器 `object` 无索引签名），净收益为零；连同容器改 `Record` 又引入调用点 TS2345。根因是缺依赖 `object-keys` 令 `map`/`props` 类型丢失的级联，非 key 约束单点可解，维持原状。
 - 其余历轮未修项（缺依赖 TS2307、正则 flag TS1501、class override TS4114、外部泛型/Symbol 槽、object-inspect 反射式动态属性）均为检查门槛或保守兜底正确，不在臆测范围内。
 
+## 第九轮详情（复审未修项 · 解构绑定成员访问）
+
+用户要求把历轮未修项全部摊开讨论是否可修。按「证据确凿 / 多库受益 / 单点可修 / 风险可控」四标准复审，逐项结论：
+
+| 未修项 | 出处 | 结论 | 依据 |
+|---|---|---|---|
+| 解构绑定成员访问 `unknown` | delay / p-debounce / p-locate | **本轮修复** | `signal.aborted` 等是真实证据却丢失 |
+| 类型谓词 `@type` 与成员访问冲突 | is-symbol | 不修 | 仅 1 条，需改注解优先级，风险>收益 |
+| 函数对象后追加字段 | once | 不修 | 实验 18→13 但引入 TS2739，多因素叠加 |
+| key 推 `unknown`（in/索引） | define-properties | 不修 | PropertyKey 只把 TS2538 换 TS7053 |
+| async 递归参数污染 | p-whilst | 不修 | 固定点深层问题，仅 1 条 |
+| 缺依赖 / class override / 正则 flag / `this` / 非标准 Symbol / 大库反射 | 十余库 | 不修 | 检查门槛或保守兜底正确 |
+
+### 本轮修复：解构绑定的成员访问证据回折到解构源
+
+**现象**：`const { signal } = opts` / `function f({ signal } = {})` 中，`signal` 被推 `unknown`，`signal.aborted`/`signal.addEventListener(...)` 报 TS2339/TS18046（delay 11 条里大半、p-debounce、p-locate 同类）。
+
+**根因**：解构出的 binding element 从未作为独立 owner 收集证据（infer 返回 `undefined`），其成员访问证据完全丢失；且 converter 给解构 pattern 加空洞的 `: {}` 注解，掩盖了解构源本可携带的形状。
+
+**修复**（三处协同）：
+1. `symbolOf` / `collectDeclarations` 支持 `BindingElement` 作为 owner，使其成员访问被收集为对象形状。
+2. `collectEvidence`：当标识符被解构（`const {…} = x`）或 owner 自身是解构 pattern 时，直接计算各 binding element 的形状（`mergeEvidence(collectEvidence(element))`，避开固定点顺序），作为**可选属性**回折进解构源的 `evidence.properties`。
+3. `convert.ts`：解构 pattern 推断为 `{}` / `unknown` 时不加注解，让 TS 从已带形状的解构源推断（否则空洞注解覆盖正确类型）。
+
+**效果**：delay strict 诊断 11→8（signal 成员访问类仅余 1 条闭包内 TS18048，属固有限制）；最小复现 `const {signal}=opts` + 可选链访问清零。`test/realLib.test.ts` 新增 2 条回归测试。**161/161 测试全绿**。
+
+**为何字段是可选**：解构源默认 `= {}`，字段确实可能缺失，工具推 `signal?` 是忠实的；真实库用 `signal?.aborted` 可选链访问，strict-clean。`value` 这类无成员访问、无默认值的字段仍保持缺失/unknown，符合「不臆测」原则。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。

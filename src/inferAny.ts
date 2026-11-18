@@ -234,6 +234,13 @@ function symbolOf(owner: ts.Node, checker: ts.TypeChecker): ts.Symbol | undefine
   ) {
     return checker.getSymbolAtLocation(owner.name);
   }
+  // A destructured binding (`const { signal } = opts` / `function f({ signal })`)
+  // is its own declaration with its own symbol. Its member accesses
+  // (`signal.aborted`, `signal.addEventListener(...)`) are real usage evidence
+  // that must be collected for the element, not lost on the parent pattern.
+  if (ts.isBindingElement(owner)) {
+    return checker.getSymbolAtLocation(owner.name);
+  }
   return undefined;
 }
 
@@ -1067,6 +1074,38 @@ function constraintsFromReference(
 ): void {
   const parent = reference.parent;
 
+  // `const { a, b } = x` / `const { a } = x`: the binding elements pulled out of
+  // `x` are real evidence for `x`'s shape. Each element is inferred on its own
+  // from how it is used (`a.foo`, `b(...)`); fold those shapes back into `x` as
+  // optional properties so destructuring yields typed bindings instead of
+  // `unknown`. Without this, `signal` in `const { signal } = opts` collapses to
+  // `unknown` and every `signal.aborted`/`signal.addEventListener` raises
+  // TS2339/TS18046. Marking this owner as an object-literal init makes
+  // mergeEvidence emit the fields as optional, matching the checker's shape.
+  if (ts.isVariableDeclaration(parent) && ts.isObjectBindingPattern(parent.name)) {
+    const pattern: ts.ObjectBindingPattern = parent.name;
+    for (const element of pattern.elements) {
+      if (element.dotDotDotToken !== undefined) {
+        continue;
+      }
+      const keyNode = element.propertyName ?? element.name;
+      if (!ts.isIdentifier(keyNode) && !ts.isStringLiteral(keyNode) && !ts.isNumericLiteral(keyNode)) {
+        continue;
+      }
+      // Compute the element's shape directly rather than reading the table:
+      // parent declarations are visited before their binding elements, so the
+      // table may not hold the element's type yet on the first fixed-point pass
+      // (and the parent then freezes as a strong owner).
+      const elementType = mergeEvidence(collectEvidence(element, ctx)).type;
+      const fieldType =
+        (element.initializer !== undefined ? typeText(ctx, element.initializer) : undefined) ?? elementType;
+      if (fieldType !== undefined && fieldType !== 'unknown' && fieldType !== 'never') {
+        evidence.properties.set(keyNode.text, fieldType);
+        evidence.objectLiteralInit = true;
+      }
+    }
+  }
+
   if (
     ts.isBinaryExpression(parent) &&
     parent.left === reference &&
@@ -1561,19 +1600,16 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
         ) {
           evidence.objectLiteralInit = true;
         }
-        // A destructured parameter with defaults — `function f({ a = 1, b = 'x' } = {})`
-        // — declares its own shape through the binding elements' default values.
-        // Those defaults are authoritative observed values, so synthesize the
-        // object shape from them. Without this, the `= {}` initializer alone
-        // yields a bare `{}` and every `a`/`b` access raises TS2339. Marking
-        // objectLiteralInit lets mergeEvidence emit the fields as optional
-        // (the whole argument may be omitted), matching the checker's own
-        // `{ a?: number; b?: string }` shape.
-        if (
-          ts.isParameter(owner) &&
-          ts.isObjectBindingPattern(owner.name) &&
-          init !== undefined
-        ) {
+        // A destructured binding — `function f({ a = 1, b = 'x' } = {})` or
+        // `const { signal } = opts` — declares its object shape partly through
+        // the binding elements themselves. Without this, the `= {}` initializer
+        // (or an opaque `opts`) yields a bare `{}` and every `a`/`signal` access
+        // raises TS2339/TS18046. Two authoritative, non-guessed sources feed each
+        // field: the element's default value, and — when it has none — the shape
+        // inferred from how that element is used (`signal.aborted`,
+        // `signal.addEventListener(...)`). objectLiteralInit lets mergeEvidence
+        // emit fields as optional where the whole binding may be omitted.
+        if (ts.isObjectBindingPattern(owner.name)) {
           for (const element of owner.name.elements) {
             if (element.dotDotDotToken !== undefined) {
               continue;
@@ -1583,9 +1619,18 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
               continue;
             }
             const key = keyNode.text;
-            const fieldType =
-              (element.initializer !== undefined ? typeText(ctx, element.initializer) : undefined) ?? 'unknown';
-            if (!evidence.properties.has(key)) {
+            let fieldType = element.initializer !== undefined ? typeText(ctx, element.initializer) : undefined;
+            if (fieldType === undefined) {
+              // No default: fall back to the element's own usage-derived shape.
+              // Compute directly rather than reading the table — a parent is
+              // visited before its binding elements, so the table may be empty
+              // for the element on the first pass and the parent then freezes.
+              const elementType = mergeEvidence(collectEvidence(element, ctx)).type;
+              if (elementType !== undefined && elementType !== 'unknown' && elementType !== 'never') {
+                fieldType = elementType;
+              }
+            }
+            if (fieldType !== undefined && !evidence.properties.has(key)) {
               evidence.properties.set(key, fieldType);
             }
           }
@@ -1929,6 +1974,7 @@ function collectDeclarations(program: ts.Program): ts.Node[] {
         ts.isVariableDeclaration(node) ||
         ts.isPropertyDeclaration(node) ||
         ts.isPropertySignature(node) ||
+        ts.isBindingElement(node) ||
         ts.isParameter(node);
       if (inferable && !seen.has(node)) {
         seen.add(node);

@@ -454,6 +454,16 @@ export function convertSource(
             annotation = `: ${parameter.dotDotDotToken ? `${options.defaultType}[]` : options.defaultType}`;
           }
         }
+        // As with `const { a } = src`, a destructured parameter must not carry a
+        // hollow `{}` / `unknown` annotation: it masks the shapes folded into
+        // the parameter's `= {}` default by the resolver.
+        if (
+          annotation !== undefined &&
+          ts.isObjectBindingPattern(parameter.name) &&
+          (annotation === ': {}' || annotation === ': unknown')
+        ) {
+          continue;
+        }
         if (annotation !== undefined) {
           edits.add(parameter.name.end, annotation);
         }
@@ -516,6 +526,14 @@ export function convertSource(
       node.initializer !== undefined &&
       isFunctionLike(node.initializer)
     ) {
+      return;
+    }
+    // A destructuring pattern (`const { a, b } = src`) must not carry a
+    // meaningless `{}` / `unknown` annotation: it would override the accurate
+    // shape already present on `src`, making every destructured binding
+    // `unknown` (TS2339/TS18046). Let TS infer the pattern from its source;
+    // the source is annotated separately with the folded element shapes.
+    if (ts.isObjectBindingPattern(node.name) && (type === '{}' || type === 'unknown')) {
       return;
     }
     edits.add(node.name.end, `: ${type}`);
