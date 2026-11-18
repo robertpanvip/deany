@@ -495,6 +495,15 @@ function renderShapeNode(node: ShapeNode): string {
   return `{ ${fields.join(' ')} }`;
 }
 
+/** Render accessed properties as an inline object type, e.g. `{ a: number; }`. */
+function renderPropertyShape(properties: ReadonlyMap<string, string>): string {
+  const fields = [...properties.entries()].map(([name, type]) => {
+    const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
+    return `${key}: ${type};`;
+  });
+  return `{ ${fields.join(' ')} }`;
+}
+
 /**
  * Array iteration methods whose callback's first parameter is an element. The
  * element's accessed property chain is a strong, structural hint about the
@@ -612,6 +621,17 @@ function typeofLiteralToType(literal: string): string {
  * for `x[k]`, `x[symbol]` and `for (k in x)` without inventing a value type.
  */
 const INDEXABLE_OBJECT = 'Record<PropertyKey, unknown>';
+
+/**
+ * Memberless object sources produced by type guards: `typeof x === 'object'`
+ * and `'k' in x` yield `object`; `typeof x === 'function'` yields `Function`.
+ * They narrow the *category* but declare no members, so a real `.foo()` /
+ * `x.bar` call on the guarded value is rejected in strict mode (TS2339 /
+ * TS18046). These are refined with the members actually accessed on the value
+ * — the same structural evidence used for `Array.isArray`'s elementShape —
+ * never by a "method name looks like X" guess.
+ */
+const MEMBERLESS_OBJECT_SOURCES = new Set(['object', 'Function']);
 
 /** Bitwise operators coerce both operands to int32 in JavaScript. */
 const BITWISE_OPERATORS = new Set<ts.SyntaxKind>([
@@ -1303,10 +1323,29 @@ function mergeEvidence(evidence: Evidence): {
     sources[0] = `Array<${renderShapeNode(evidence.elementShape)}>`;
   }
 
+  // A type guard narrows a value to a memberless category (`object` / `Function`),
+  // and real method/property calls on that narrowed value declare the members
+  // it must have. Intersect those members back so strict mode accepts the
+  // calls (TS2339 / TS18046). Only memberless sources are refined — concrete
+  // classes and unions of concrete types are left untouched, so incidental
+  // accesses never pollute a known type. Marked weak so a later round's
+  // concrete call-site type can refine it, as the property-shape last resort.
+  let narrowedFromGuards = false;
+  if (evidence.properties.size > 0) {
+    const shape = renderPropertyShape(evidence.properties);
+    for (let i = 0; i < sources.length; i += 1) {
+      const source = sources[i];
+      if (source !== undefined && MEMBERLESS_OBJECT_SOURCES.has(source)) {
+        sources[i] = `${source} & ${shape}`;
+        narrowedFromGuards = true;
+      }
+    }
+  }
+
   // A shape synthesized purely from accessed properties is weak evidence: a
   // later round may find a concrete type (e.g. a call-site argument) that is
   // more precise and should replace it.
-  let weak = false;
+  let weak = narrowedFromGuards;
 
   if (sources.length > 0) {
     // Observed values are authoritative; constraints may narrow them.
@@ -1332,11 +1371,7 @@ function mergeEvidence(evidence: Evidence): {
     members = allowed;
   } else if (evidence.properties.size > 0) {
     // Last resort: synthesize an object shape from accessed properties.
-    const fields = [...evidence.properties.entries()].map(([name, type]) => {
-      const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
-      return `${key}: ${type};`;
-    });
-    members = [`{ ${fields.join(' ')} }`];
+    members = [renderPropertyShape(evidence.properties)];
     weak = true;
   } else {
     return { reason: 'no usage evidence' };

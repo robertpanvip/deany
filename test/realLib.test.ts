@@ -416,3 +416,26 @@ function f(x: any) { if (Array.isArray(x)) { x.custom(function (item) { void ite
   assert.match(output, /x: unknown\[\]/);
   assert.doesNotMatch(output, /Array<\{ a:/);
 });
+
+test('typeof object narrowing + method call stays strict-clean in JS implicit-any mode', () => {
+  const { output, diagnostics } = convertJs(`
+function f(x) {
+  if (typeof x === 'object' && x !== null) { x.render(); }
+}
+`);
+  assert.match(output, /x: object & \{ render:/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  assert.ok(!diagnostics.some((d) => d.includes('TS2339')), diagnostics.join('\n'));
+});
+
+test('in-operator narrowing + method call stays strict-clean in JS implicit-any mode', () => {
+  const { output } = convertJs(`
+function f(x) {
+  if ('render' in x) { x.render(); }
+}
+`);
+  assert.match(output, /x: object & \{ render:/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});

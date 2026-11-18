@@ -114,6 +114,16 @@ function handle(x: any) {              // x → Box | unknown[]
 
 若调用点实参本身有更直接的证据（如初始化器），以该证据为准；约束仅在其缺失时用于推断。函数体没有任何收窄信息（`typeof` / `isArray` / `instanceof`）时，参数不会被臆测为具体类型。
 
+**收窄后调用方法的交叉精化**：`typeof x === 'object'`、`'k' in x`、`typeof x === 'function'` 这几类守卫只把值收窄到「无成员」的类别（`object` / `Function`），但分支内真实调用的 `x.render()` / `x.tag` 恰恰声明了它必须有哪些成员。工具把这些**实际访问到的成员**交叉回来源，避免 strict 下的 TS2339 / TS18046，与 `Array.isArray` 精化 `unknown[]` 是同一套结构证据机制（不是「方法名看起来像某类」的臆测——那套危险反推已回退）：
+
+```ts
+function handle(x: any) {
+  if ('render' in x) { x.render(); }   // x → object & { render: (...args: unknown[]) => unknown; }
+}
+```
+
+精化只作用于 `object` / `Function` 这类无成员来源，**绝不污染** `instanceof` 推出的具体类（如 `Box`）或具体来源的联合——具体类自带成员表， incidental 访问不会塞进去。该证据标记为弱，后续轮次若有更具体的调用点类型会覆盖它。
+
 **弱证据的二次精化**：从「方法调用 / 属性访问」合成的对象形状（`{ toFixed: fn }`）属于弱证据，会先临时定型；如果调用点实参在后续轮次推断出了更具体的类型，参数会被**精化**为该具体类型（number 自带 `toFixed`，天然满足这个形状）：
 
 ```ts

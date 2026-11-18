@@ -399,6 +399,44 @@ function handle(x: any) {
   assert.match(output, /function handle\(x: Date\)/);
 });
 
+test('refines a typeof-object narrowing with members actually called inside the branch', () => {
+  const { output } = infer(`
+function handle(x: any) {
+  if (typeof x === 'object' && x !== null) { x.render(); }
+}
+`);
+  assert.match(output, /function handle\(x: \(?object & \{ render: \(\.\.\.args: unknown\[\]\) => unknown; \}\)?\)/);
+});
+
+test('refines a typeof-function narrowing with properties read inside the branch', () => {
+  const { output } = infer(`
+function handle(x: any) {
+  if (typeof x === 'function') { return x.tag; }
+}
+`);
+  assert.match(output, /function handle\(x: \(?Function & \{ tag: unknown; \}\)?\)/);
+});
+
+test('refines an in-operator narrowing with the method called inside the branch', () => {
+  const { output } = infer(`
+function handle(x: any) {
+  if ('render' in x) { x.render(); }
+}
+`);
+  assert.match(output, /function handle\(x: \(?object & \{ render: \(\.\.\.args: unknown\[\]\) => unknown; \}\)?\)/);
+});
+
+test('does not pollute a concrete class source with incidental member accesses', () => {
+  const { output } = infer(`
+class Box { value = 1; }
+function handle(x: any) {
+  if (x instanceof Box) { return x.value; }
+}
+`);
+  assert.match(output, /function handle\(x: Box\)/);
+  assert.doesNotMatch(output, /Box & \{/);
+});
+
 test('unions typeof and instanceof narrowing into a parameter union', () => {
   const { output } = infer(`
 class Box { v = 1; }
