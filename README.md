@@ -234,6 +234,45 @@ let names: Array<string>;
 
 JSDoc 始终优先于推断。想关掉这个行为，用 `--no-infer-usage`。
 
+## 用同名 `.d.ts` 精确还原 JS
+
+如果 JS 文件旁边有**同名声明文件**（`lib.js` + `lib.d.ts`），`deany` 会自动把 d.ts 的签名与 JS 实现**结合**：d.ts 里已经写好的函数签名、泛型、参数/返回类型、interface/type 别名都是权威契约，直接贴回实现，不再靠 JSDoc 或用法去猜。这让「JS + 声明文件」可以高保真地还原成严格 TS。
+
+```bash
+deany lib.js -o lib.ts --check
+```
+
+输入 `calc.js`（没有任何 JSDoc）：
+
+```js
+function add(a, b) { return a + b; }
+const VERSION = '1.0.0';
+module.exports = { add, VERSION };
+```
+
+旁边的 `calc.d.ts`：
+
+```ts
+export function add(a: number, b: number): number;
+export const VERSION: string;
+```
+
+输出 `calc.ts`：
+
+```ts
+function add(a: number, b: number): number { return a + b; }
+const VERSION: string = '1.0.0';
+module.exports = { add, VERSION };
+```
+
+- **优先级**：同名 d.ts > JSDoc > usage 推断 > `unknown`。d.ts 存在时它的签名覆盖 JSDoc。
+- **泛型与类型**：`<T>`、`T[]`、`T | null` 等原样保留；d.ts 里的 interface / type / enum 声明会原样合并到输出顶部（与 `@typedef` 同名时跳过，避免重复）。
+- **类**：`declare class` 的方法签名与字段类型会贴回同名 JS class 的成员。
+- **作用范围**：只处理**同名 d.ts**，不会读取 `import` 进来的第三方 d.ts（这部分由 checker 的上下文类型负责）。
+- 不想要这个行为时用 `--no-dts`，将完全退回 JSDoc + usage 推断。
+
+> 说明：d.ts 只描述公共 API 契约，函数体内部的局部变量类型仍需 JSDoc / usage 推断补充；两者结合才得到完整的严格 TS。`noUncheckedIndexedAccess` 等严格选项下，JS 实现体里原本就存在的索引访问告警（如 `items[i]` 为 `T | undefined`）属于实现本身的问题，不由 d.ts 合并修正。
+
 ## 库用法
 
 ```ts

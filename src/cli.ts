@@ -24,6 +24,7 @@ Options (conversion):
       --no-typedef       Do not emit type aliases for @typedef / @callback
       --no-annotate      Leave undocumented parameters/returns without annotations
       --no-infer-usage   Do not infer types from usage for JS declarations
+      --no-dts           Ignore a sibling <name>.d.ts instead of using its signatures
       --no-callback-params  Do not annotate callbacks that lack contextual typing
       --array-shorthand  Emit T[] instead of Array<T>
       --loose            Keep any/*/? as any instead of unknown
@@ -51,6 +52,7 @@ interface CliArgs {
   readonly check: boolean;
   readonly initConfig: boolean;
   readonly inferUsage: boolean;
+  readonly useDts: boolean;
 }
 
 function parseArgs(argv: readonly string[]): CliArgs | undefined {
@@ -63,6 +65,7 @@ function parseArgs(argv: readonly string[]): CliArgs | undefined {
   let check = false;
   let initConfig = false;
   let inferUsage = true;
+  let useDts = true;
   const options: MutableOptions = {};
   const positional: string[] = [];
 
@@ -91,6 +94,9 @@ function parseArgs(argv: readonly string[]): CliArgs | undefined {
         break;
       case '--no-infer-usage':
         inferUsage = false;
+        break;
+      case '--no-dts':
+        useDts = false;
         break;
       case '--no-callback-params':
         options.annotateUntypedCallbacks = false;
@@ -123,7 +129,7 @@ function parseArgs(argv: readonly string[]): CliArgs | undefined {
     throw new Error('--default-type requires a non-empty type.');
   }
 
-  return { input: positional[0] ?? '', output, options, check, initConfig, inferUsage };
+  return { input: positional[0] ?? '', output, options, check, initConfig, inferUsage, useDts };
 }
 
 interface InferArgs {
@@ -217,7 +223,13 @@ function convertMain(argv: readonly string[]): number {
         })
       : undefined;
 
-  const { results, written } = convertPath(args.input, args.output, args.options, resolver);
+  const { results, written } = convertPath(
+    args.input,
+    args.output,
+    args.options,
+    resolver,
+    args.useDts,
+  );
   for (const result of results) {
     for (const diagnostic of result.diagnostics) {
       process.stderr.write(`${result.fileName}: ${diagnostic.message}\n`);

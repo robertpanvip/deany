@@ -257,6 +257,13 @@
 - 1.4 叶子参与 `+`（`o.a.b + o.x.y`）：深层形状已推对，但叶子 unknown 参与算术是本轮之外的问题。
 - 报告第 2 节 6 项（无调用点 add、递归、switch typeof、可选链链深、`require('node:path')`、esm-export-infer）：均为已确认取舍或门禁限制。
 
+## 同名 d.ts 精确还原（用户提出，本轮实现）
+
+- **需求**：JS 文件旁边有同名 `.d.ts` 时，把声明签名与 JS 实现结合，高保真还原成 TS——checker 里 d.ts 签名本就完整可取（`(opts: Options) => Result`、泛型 `find<T>`、interface 全在），此前 `fs.ts` 把 d.ts 排除、从不读取，属「没做」非「做不到」。
+- **实现**：新增 `src/dts.ts` 的 `loadDeclarations`——解析同名 d.ts AST（不用 checker，保留泛型/重载/类型名原文），按符号名收集函数签名、变量类型、class 成员、interface/type/enum 声明。`convertSource` 新增可选 `declarations` 参数，作为**最强 source**：d.ts > JSDoc > usage > unknown；函数参数按位置贴回、返回类型/`<T>` 原样采用、class 方法字段贴回、interface/type 原样合并到输出顶部（与 `@typedef` 同名跳过，且从 dangling 别名中剔除避免冲突）。`fs.ts`/`cli.ts` 接线，新增 `--no-dts` 关闭。
+- **验证**：真实样例 `calc.js`+`calc.d.ts`（无 JSDoc）→ `add(a:number,b:number):number`/`VERSION:string`，strict 通过；泛型 `wrap<T>(value:T):T[]`；interface 合并；d.ts 覆盖 JSDoc（`string`→`number`）、`--no-dts` 回退；class 方法字段。测试 `test/dts.test.ts` 5 项 + 全套 **181/181 全绿**，typecheck/build 通过。
+- **已知边界**：d.ts 只覆盖公共 API，函数体内部局部变量仍靠 JSDoc/usage；同名 d.ts 之外不读取 import 的第三方 d.ts；`noUncheckedIndexedAccess` 下 JS 实现体原有的索引访问告警（`items[i]` → `T | undefined`）是实现本身问题，不在 d.ts 合并范围。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。

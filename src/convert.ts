@@ -8,6 +8,8 @@ import type {
 } from './types.js';
 import { DEFAULT_OPTIONS } from './types.js';
 import type { UsageResolver } from './inferAny.js';
+import type { DeclarationProvider, DtsSignature } from './dts.js';
+import { memberKey } from './dts.js';
 import { leadingJsDoc, parseJsDocBlocks, parseTemplateNames } from './jsdoc.js';
 import {
   extractCustomTypeNames,
@@ -372,6 +374,7 @@ export function convertSource(
   source: string,
   optionsInput: Partial<ConvertOptions> = {},
   resolver?: UsageResolver,
+  declarations?: DeclarationProvider,
 ): ConvertResult {
   const options: ConvertOptions = { ...DEFAULT_OPTIONS, ...optionsInput };
   // When a resolver is supplied, use its SourceFile so checker symbols line up.
@@ -396,6 +399,24 @@ export function convertSource(
     diagnostics.push({ severity: 'warn', message, file: fileName, offset });
   };
 
+  // A sibling `.d.ts` is the authoritative contract for a symbol. When one is
+  // present its signature wins over JSDoc and usage inference: this is how a
+  // JS implementation gets "combined" with its declaration into exact TS.
+  const dtsSignatureForFunction = (node: FunctionLikeNode): DtsSignature | undefined => {
+    if (declarations === undefined) {
+      return undefined;
+    }
+    const key = memberKey(node);
+    if (key !== undefined) {
+      const member = declarations.members.get(key);
+      return typeof member === 'object' ? member : undefined;
+    }
+    if ('name' in node && node.name !== undefined && ts.isIdentifier(node.name)) {
+      return declarations.functions.get(node.name.text);
+    }
+    return undefined;
+  };
+
   const processFunction = (
     node: FunctionLikeNode,
     doc: JsDocBlock | undefined,
@@ -413,12 +434,18 @@ export function convertSource(
     const generator = isGenerator(node);
     const skipReturn =
       generator || ts.isConstructorDeclaration(node) || ts.isSetAccessorDeclaration(node);
+    const dtsSig = dtsSignatureForFunction(node);
     const genericSuffix =
-      typeParameters.length > 0 ? `<${typeParameters.join(', ')}>` : undefined;
+      dtsSig?.typeParams ??
+      (typeParameters.length > 0 ? `<${typeParameters.join(', ')}>` : undefined);
 
     let returnAnnotation: string | undefined;
     if (!skipReturn) {
-      if (returnTag?.typeText !== undefined) {
+      if (dtsSig?.returnType !== undefined) {
+        // The d.ts return type is authoritative and already fully written
+        // (including any Promise<...> for async functions) — do not re-wrap.
+        returnAnnotation = `: ${dtsSig.returnType}`;
+      } else if (returnTag?.typeText !== undefined) {
         let returnType = normalizeJsDocType(returnTag.typeText, options);
         if (async) {
           returnType = wrapAsyncReturn(returnType, options);
@@ -450,7 +477,12 @@ export function convertSource(
           usedTags.add(tag);
         }
         let annotation = '';
-        if (tag?.typeText !== undefined) {
+        const dtsParam = dtsSig?.params[0];
+        if (dtsParam !== undefined) {
+          const restType =
+            dtsParam.rest && !dtsParam.type.endsWith('[]') ? `${dtsParam.type}[]` : dtsParam.type;
+          annotation = `: ${restType}`;
+        } else if (tag?.typeText !== undefined) {
           const type = first.dotDotDotToken
             ? normalizeRestType(tag.typeText, options)
             : normalizeJsDocType(tag.typeText, options);
@@ -509,6 +541,16 @@ export function convertSource(
         }
 
         let annotation: string | undefined;
+        const dtsParam = dtsSig?.params[index];
+        if (dtsParam !== undefined) {
+          const restType =
+            dtsParam.rest && !dtsParam.type.endsWith('[]') ? `${dtsParam.type}[]` : dtsParam.type;
+          const optional =
+            dtsParam.optional &&
+            parameter.initializer === undefined &&
+            parameter.dotDotDotToken === undefined;
+          annotation = `${optional ? '?' : ''}: ${restType}`;
+        }
         // `@param {string} [options.foo]` describes a field of `options`, not a
         // separate parameter. The checker collapses these to a bare `object` and
         // drops the fields, so fold every dotted tag back into an inline shape.
@@ -521,7 +563,7 @@ export function convertSource(
                   item.name !== undefined &&
                   item.name.startsWith(`${name}.`),
               );
-        if (dottedTags.length > 0) {
+        if (annotation === undefined && dottedTags.length > 0) {
           for (const dotted of dottedTags) {
             usedTags.add(dotted);
           }
@@ -532,14 +574,14 @@ export function convertSource(
             parameter.initializer === undefined &&
             parameter.dotDotDotToken === undefined;
           annotation = `${optional ? '?' : ''}: ${shape}`;
-        } else if (tag?.typeText !== undefined) {
+        } else if (annotation === undefined && tag?.typeText !== undefined) {
           const type = parameter.dotDotDotToken || tag.variadic
             ? normalizeRestType(tag.typeText, options)
             : normalizeJsDocType(tag.typeText, options);
           const optional =
             tag.optional && parameter.initializer === undefined && parameter.dotDotDotToken === undefined;
           annotation = `${optional ? '?' : ''}: ${type}`;
-        } else {
+        } else if (annotation === undefined) {
           const inferred = resolver?.infer(parameter);
           if (inferred !== undefined) {
             annotation = `: ${parameter.dotDotDotToken && !inferred.endsWith('[]') ? `${inferred}[]` : inferred}`;
@@ -592,7 +634,13 @@ export function convertSource(
     if (node.parent !== undefined && ts.isCatchClause(node.parent)) {
       return;
     }
-    let type = doc === undefined ? undefined : typeForTaggedDeclaration(doc, options);
+    let type =
+      declarations !== undefined && ts.isIdentifier(node.name)
+        ? declarations.variables.get(node.name.text)
+        : undefined;
+    if (type === undefined) {
+      type = doc === undefined ? undefined : typeForTaggedDeclaration(doc, options);
+    }
     if (type === undefined) {
       type = resolver?.infer(node);
     }
@@ -633,7 +681,12 @@ export function convertSource(
   };
 
   const processProperty = (node: ts.PropertyDeclaration, doc: JsDocBlock | undefined): void => {
-    let type = doc === undefined ? undefined : typeForTaggedDeclaration(doc, options);
+    const key = memberKey(node);
+    const memberType = key === undefined || declarations === undefined ? undefined : declarations.members.get(key);
+    let type = typeof memberType === 'string' ? memberType : undefined;
+    if (type === undefined) {
+      type = doc === undefined ? undefined : typeForTaggedDeclaration(doc, options);
+    }
     if (type === undefined) {
       type = resolver?.infer(node);
     }
@@ -838,6 +891,9 @@ export function convertSource(
       }
     }
   }
+  const dtsTypeNames = new Set<string>(
+    declarations === undefined ? [] : declarations.typeDeclarations.map((decl) => decl.name),
+  );
   const dangling = new Set<string>();
   for (const block of blocks) {
     for (const tag of block.tags) {
@@ -845,8 +901,35 @@ export function convertSource(
         continue;
       }
       for (const name of extractCustomTypeNames(tag.typeText, definedNames, templateNames)) {
-        dangling.add(name);
+        // A sibling d.ts already provides this type — emitting a fallback
+        // `type X = unknown` would conflict with the real declaration.
+        if (!dtsTypeNames.has(name)) {
+          dangling.add(name);
+        }
       }
+    }
+  }
+
+  // Emit the sibling d.ts's type-level declarations (interfaces / type aliases
+  // / enums) verbatim, so the exact signatures pasted onto the JS functions
+  // resolve to their real shapes. Skip any name a @typedef already defines.
+  if (declarations !== undefined && declarations.typeDeclarations.length > 0) {
+    const emitted = new Set(definedNames);
+    const declTexts: string[] = [];
+    for (const decl of declarations.typeDeclarations) {
+      if (emitted.has(decl.name)) {
+        continue;
+      }
+      emitted.add(decl.name);
+      declTexts.push(decl.text);
+    }
+    if (declTexts.length > 0) {
+      const insertAt = source.startsWith('#!') ? (source.indexOf('\n') + 1 || 0) : 0;
+      edits.add(insertAt, `${declTexts.join('\n\n')}\n\n`);
+      warn(
+        `Merged ${declTexts.length} type declaration(s) from ${declarations.dtsPath}.`,
+        insertAt,
+      );
     }
   }
 

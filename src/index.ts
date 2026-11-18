@@ -1,4 +1,11 @@
 export { convertSource } from './convert.js';
+export { findSiblingDts, loadDeclarations } from './dts.js';
+export type {
+  DeclarationProvider,
+  DtsSignature,
+  DtsParameter,
+  DtsTypeDeclaration,
+} from './dts.js';
 export { checkStrict } from './check.js';
 export { strictTsConfig } from './config.js';
 export { collectJsFiles, collectTsFiles, convertPath, defaultOutputPath } from './fs.js';

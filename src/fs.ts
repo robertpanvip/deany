@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { convertSource } from './convert.js';
 import type { UsageResolver } from './inferAny.js';
+import { loadDeclarations } from './dts.js';
 import type { ConvertOptions, ConvertResult } from './types.js';
 
 const SKIP_DIRECTORIES = new Set(['node_modules', 'dist', '.git', '.codebuddy']);
@@ -68,6 +69,7 @@ export function convertPath(
   output: string | undefined,
   options: Partial<ConvertOptions>,
   resolver?: UsageResolver,
+  useDts = true,
 ): BatchResult {
   const stat = fs.statSync(input);
   const sourceDir = stat.isDirectory() ? input : undefined;
@@ -82,11 +84,16 @@ export function convertPath(
       sourceDir === undefined
         ? (output ?? defaultOutputPath(file))
         : defaultOutputPath(file, sourceDir, outDir);
+    // A sibling `<name>.d.ts` is the authoritative contract for this JS file.
+    // Its signatures are combined with the implementation during conversion
+    // unless the caller opts out with --no-dts.
+    const declarations = useDts ? loadDeclarations(file) : undefined;
     const result = convertSource(
       resolver === undefined ? path.basename(file) : path.resolve(file),
       source,
       options,
       resolver,
+      declarations,
     );
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, result.output, 'utf8');
