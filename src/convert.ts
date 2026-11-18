@@ -180,6 +180,73 @@ function isCallbackArgument(node: FunctionLikeNode): boolean {
 }
 
 /**
+ * Detect a callback passed to a method call on a receiver that the converter
+ * will give a concrete type via JSDoc, so lib.d.ts will contextually type the
+ * callback parameters. Covers `sum(nums)` where `nums` has `@param {...number}`
+ * (converted to `number[]`), or a variable with an inline `@type` array tag.
+ */
+function callbackReceiverHasJSDocType(
+  node: FunctionLikeNode,
+  sourceFile: ts.SourceFile,
+  source: string,
+  blocks: readonly JsDocBlock[],
+): boolean {
+  let call: ts.Node | undefined = node.parent;
+  while (call !== undefined && !ts.isCallExpression(call)) {
+    call = call.parent;
+  }
+  if (call === undefined || !ts.isCallExpression(call)) {
+    return false;
+  }
+  // The callback must actually be an argument of this call.
+  if (!call.arguments.some((arg) => arg === node || (arg as ts.Node).pos === node.pos)) {
+    return false;
+  }
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression)) {
+    return false;
+  }
+  const receiverName = callee.expression.text;
+
+  // Find the receiver's declaration (parameter or variable) in the file by
+  // name, then check whether it carries a JSDoc that yields an array/object
+  // type after conversion.
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    let declName: ts.Identifier | undefined;
+    if ((ts.isParameter(n) || ts.isVariableDeclaration(n)) && ts.isIdentifier(n.name)) {
+      declName = n.name;
+    }
+    if (declName !== undefined && declName.text === receiverName) {
+      // For a parameter, its JSDoc `@param` lives on the enclosing function;
+      // for a variable, the `@type` tag lives on the declaration itself.
+      let doc = leadingJsDoc(n, sourceFile, source, blocks);
+      if (doc === undefined && ts.isParameter(n) && isFunctionLike(n.parent)) {
+        doc = leadingJsDoc(n.parent, sourceFile, source, blocks);
+      }
+      if (doc !== undefined) {
+        for (const tag of doc.tags) {
+          const namesReceiver =
+            tag.tag === 'type' || (tag.tag === 'param' && tag.name === receiverName);
+          if (
+            namesReceiver &&
+            tag.typeText !== undefined &&
+            (/\[\]/.test(tag.typeText) || /Array\s*</.test(tag.typeText) || tag.variadic)
+          ) {
+            found = true;
+            return;
+          }
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+/**
  * Annotate only those callback parameters that are genuinely implicit `any`
  * (no contextual type from the callee). Parameters whose types come from
  * contextual typing are left untouched, so `map`/`filter`/`reduce` inference
@@ -192,8 +259,19 @@ function annotateImplicitAnyCallback(
   source: string,
   defaultType: string,
   edits: EditBuffer,
+  blocks: readonly JsDocBlock[],
 ): void {
   if (resolver === undefined || node.parameters.length === 0) {
+    return;
+  }
+  // If the callback is an argument to a method call whose receiver will be
+  // concretely typed after conversion (e.g. `sum(nums)` where nums carries a
+  // JSDoc `@param {...number}` that converts to `number[]`), lib.d.ts supplies
+  // contextual types for the callback parameters. Annotating them `unknown`
+  // here would override that and break strict mode (TS18046/TS2322). The
+  // checker cannot see this because it reads the pre-conversion source, so
+  // detect the JSDoc-typed receiver from the AST instead.
+  if (callbackReceiverHasJSDocType(node, sourceFile, source, blocks)) {
     return;
   }
   const toAnnotate = node.parameters.filter(
@@ -207,13 +285,29 @@ function annotateImplicitAnyCallback(
   const unparenthesized =
     ts.isArrowFunction(node) && parens === undefined && node.parameters.length === 1;
 
+  // Prefer a concrete usage-derived type for the parameter over the blind
+  // default. E.g. `(s) => s.length` used as a call argument gives `s` a
+  // `{ length: unknown; }` shape from its own member access; annotating it
+  // `unknown` instead would make `s.length` a TS18046.
+  const paramType = (parameter: ts.ParameterDeclaration): string => {
+    const inferred = resolver.infer(parameter);
+    const usable =
+      inferred !== undefined &&
+      inferred !== 'any' &&
+      inferred !== 'unknown' &&
+      inferred !== 'never' &&
+      inferred !== 'void';
+    const base = usable ? (inferred as string) : defaultType;
+    return parameter.dotDotDotToken && !base.endsWith('[]') ? `${base}[]` : base;
+  };
+
   if (unparenthesized) {
     // `x => ...` cannot carry a type annotation; rewrite to `(x: T) => ...`.
     const first = toAnnotate[0];
     if (first !== undefined && resolver.isImplicitAnyParameter(first)) {
       const start = first.getStart(sourceFile);
       const end = first.name.end;
-      const rest = first.dotDotDotToken ? `${defaultType}[]` : defaultType;
+      const rest = paramType(first);
       edits.add(start, '(');
       edits.add(end, `: ${rest})`);
     }
@@ -221,8 +315,7 @@ function annotateImplicitAnyCallback(
   }
 
   for (const parameter of toAnnotate) {
-    const rest = parameter.dotDotDotToken ? `${defaultType}[]` : defaultType;
-    edits.add(parameter.name.end, `: ${rest}`);
+    edits.add(parameter.name.end, `: ${paramType(parameter)}`);
   }
 }
 
@@ -557,15 +650,62 @@ export function convertSource(
     edits.add(node.name.end, needsDefiniteAssignment ? `!: ${type}` : `: ${type}`);
   };
 
+  // Infer the type of a literal initializer without a checker, so `this.x = 1`
+  // is still promoted when convertSource is used without a UsageResolver. Only
+  // unambiguous primitive/container literals are named; anything else is left
+  // to the resolver or dropped rather than guessed.
+  const literalTypeOf = (expr: ts.Expression): string | undefined => {
+    if (ts.isNumericLiteral(expr)) {
+      return 'number';
+    }
+    if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
+      return 'string';
+    }
+    if (
+      expr.kind === ts.SyntaxKind.TrueKeyword ||
+      expr.kind === ts.SyntaxKind.FalseKeyword
+    ) {
+      return 'boolean';
+    }
+    if (ts.isArrayLiteralExpression(expr)) {
+      return 'unknown[]';
+    }
+    if (ts.isObjectLiteralExpression(expr)) {
+      return 'object';
+    }
+    if (expr.kind === ts.SyntaxKind.NullKeyword) {
+      return 'null';
+    }
+    return undefined;
+  };
+
   const processThisAssignment = (
     node: ts.BinaryExpression,
-    doc: JsDocBlock,
+    doc: JsDocBlock | undefined,
   ): void => {
     const left = node.left;
     if (!ts.isPropertyAccessExpression(left) || !ts.isIdentifier(left.name)) {
       return;
     }
-    const type = typeForTaggedDeclaration(doc, options);
+    // README promises `this.x = ...` is promoted to a class field. The JSDoc
+    // `@type` is authoritative when present; otherwise the assigned value is
+    // real evidence for the field's type (e.g. `this.x = 1` -> number), so use
+    // it instead of leaving the field undeclared (which makes every `this.x`
+    // access a TS2339). Only a concrete, informative type qualifies — no
+    // `any`/`unknown`/`void` guessing.
+    let type = doc === undefined ? undefined : typeForTaggedDeclaration(doc, options);
+    if (type === undefined) {
+      const fromValue = resolver?.typeOf(node.right) ?? literalTypeOf(node.right);
+      if (
+        fromValue !== undefined &&
+        fromValue !== 'any' &&
+        fromValue !== 'unknown' &&
+        fromValue !== 'never' &&
+        fromValue !== 'void'
+      ) {
+        type = fromValue;
+      }
+    }
     if (type === undefined) {
       return;
     }
@@ -580,7 +720,11 @@ export function convertSource(
     }
     names.add(className);
     thisFields.set(classNode, names);
-    edits.add(classNode.members.pos, `\n  ${className}: ${type};`);
+    // JS assigns these fields dynamically (often in a helper method rather
+    // than the constructor), which TS's strictPropertyInitialization cannot
+    // see. A definite-assignment assertion keeps every access strict-clean
+    // without weakening the declared type.
+    edits.add(classNode.members.pos, `\n  ${className}!: ${type};`);
   };
 
   const visit = (node: ts.Node): void => {
@@ -606,7 +750,7 @@ export function convertSource(
       } else if (options.annotateUntypedCallbacks) {
         // A callback without JSDoc: only annotate parameters that truly lack
         // contextual typing. Contextual callbacks are left to TS inference.
-        annotateImplicitAnyCallback(node, resolver, sourceFile, source, options.defaultType, edits);
+        annotateImplicitAnyCallback(node, resolver, sourceFile, source, options.defaultType, edits, blocks);
       }
     }
 
@@ -617,9 +761,7 @@ export function convertSource(
       node.left.expression.kind === ts.SyntaxKind.ThisKeyword
     ) {
       const doc = leadingJsDoc(node, sourceFile, source, blocks);
-      if (doc !== undefined) {
-        processThisAssignment(node, doc);
-      }
+      processThisAssignment(node, doc);
     }
 
     if (ts.isVariableDeclaration(node)) {

@@ -585,11 +585,26 @@ let copy: any = value;
   assert.match(output, /let copy: number = value;/);
 });
 
-test('keeps the method shape when the call-site argument has no concrete evidence', () => {
+test('narrows to the builtin type when the only method is lib-unique', () => {
   const { output } = infer(`
 function format(x: any) { return x.toFixed(2); }
+function upper(s: any) { return s.toUpperCase(); }
+function stamp(d: any) { return d.getTime(); }
 `);
-  assert.match(output, /function format\(x: \{ toFixed: \(\.\.\.args: unknown\[\]\) => unknown; \}\)/);
+  // `toFixed`/`toUpperCase`/`getTime` exist on exactly one builtin family in
+  // lib.d.ts, so a binding observed only calling them narrows to number /
+  // string / Date. Weak evidence: a concrete call-site type still wins.
+  assert.match(output, /function format\(x: number\)/);
+  assert.match(output, /function upper\(s: string\)/);
+  assert.match(output, /function stamp\(d: Date\)/);
+});
+
+test('does not narrow when a non-unique method is also observed', () => {
+  const { output } = infer(`
+function f(o: any) { o.toUpperCase(); o.customThing(); }
+`);
+  assert.match(output, /customThing/);
+  assert.doesNotMatch(output, /o: string/);
 });
 
 test('instantiates generic classes inferred via instanceof with unknown', () => {

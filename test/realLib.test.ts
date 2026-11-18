@@ -252,13 +252,18 @@ function shift(a: any, b: any) { return a << b; }
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
 
-test('relational comparison infers number or string operands', () => {
+test('relational comparison narrows an operand to the other side\'s concrete type', () => {
   const output = inferTs(`
 function gt(x: any) { return x > 10; }
 function lt(y: any) { return y < 'z'; }
+function cmp(a: any, b: any) { return a < b; }
 `);
-  assert.match(output, /x: \(?number \| string\)?/);
-  assert.match(output, /y: \(?number \| string\)?/);
+  // The other operand is authoritative: `x > 10` proves x numeric, `y < 'z'`
+  // proves y a string. Only when neither side is concrete do we fall back to
+  // the conservative `number | string` estimate.
+  assert.match(output, /x: number/);
+  assert.match(output, /y: string/);
+  assert.match(output, /a: \(?number \| string\)?/);
 });
 
 test('the right operand of the in operator infers an object', () => {
@@ -635,6 +640,98 @@ export function f({ signal } = {}) {
 }
 `);
   assert.match(output, /\{ signal \}: \{ signal\?: \{ aborted: unknown; reason: unknown;/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('non-empty array literal widens its element type from later pushes', () => {
+  const { output } = convertJs(`
+const a = [1];
+a.push('x');
+`);
+  assert.match(output, /Array<number \| string>|Array<string \| number>/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('relational comparison against a numeric literal narrows the operand to number', () => {
+  const { output } = convertJs(`
+export function f(x) { let n = 0; return n < x; }
+`);
+  assert.match(output, /x: number/);
+  assert.doesNotMatch(output, /x: number \| string/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('index-expression keys are inferred as PropertyKey', () => {
+  const { output } = convertJs(`
+export function read(x, k) { return x[k]; }
+export function write(o, k, v) { o[k] = v; }
+`);
+  assert.match(output, /k: PropertyKey/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('deep property chains produce nested object shapes', () => {
+  const { output } = convertJs(`
+export function f(o) { return o.a.b.c; }
+`);
+  assert.match(output, /a: \{ b: \{ c: unknown; \}; \}/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('iteration methods infer element shapes without an Array.isArray guard', () => {
+  const { output } = convertJs(`
+export function f(xs) { return xs.map(it => it.a.b); }
+`);
+  assert.match(output, /Array<\{ a: \{ b: unknown; \}; \}>/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('reduce callback with JSDoc-typed array receiver keeps its contextual params', () => {
+  const { output } = convertJs(`
+/** @param {...number} nums */
+export function sum(nums) { return nums.reduce((a, b) => a + b, 0); }
+`);
+  // The callback parameters must NOT be blindly annotated `unknown`; TS infers
+  // them as number from `nums: number[]`.
+  assert.match(output, /reduce\(\(a, b\)/);
+  assert.doesNotMatch(output, /reduce\(\(a: unknown, b: unknown\)/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('higher-order callback does not degrade the function parameter to any', () => {
+  const { output } = convertJs(`
+export function apply(fn, v) { return fn(v); }
+apply((s) => s.length, 'x');
+`);
+  assert.doesNotMatch(output, /fn: \(s: any\) => any/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('new containers without type arguments use unknown instead of any', () => {
+  const { output } = convertJs(`
+const m = new Map();
+const s = new Set();
+`);
+  assert.match(output, /Map<unknown, unknown>/);
+  assert.match(output, /Set<unknown>/);
+  assert.doesNotMatch(output, /<any|any>/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('Math.max spread narrows the spread array element to number', () => {
+  const { output } = convertJs(`
+export function f(xs) { return Math.max(...xs); }
+`);
+  assert.match(output, /xs: number\[\]/);
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });

@@ -642,6 +642,63 @@ const ARRAY_BUILTIN_MEMBERS = new Set<string>([
 ]);
 
 /**
+ * Methods that, in the standard lib, exist on exactly one primitive/builtin
+ * family. A binding whose ONLY evidence is calls to these methods can be
+ * narrowed to that family. This is not a name guess — the method is unique in
+ * lib.d.ts — but it is still weak evidence: apply it only as a last resort and
+ * never when the binding has a real source or other, non-unique properties.
+ */
+const UNIQUE_BUILTIN_METHODS: ReadonlyArray<{
+  readonly type: string;
+  readonly methods: ReadonlySet<string>;
+}> = [
+  {
+    type: 'string',
+    methods: new Set([
+      'toUpperCase', 'toLowerCase', 'trim', 'trimStart', 'trimEnd', 'charAt',
+      'charCodeAt', 'indexOf', 'lastIndexOf', 'startsWith', 'endsWith', 'includes',
+      'split', 'substring', 'substr', 'repeat', 'padStart', 'padEnd', 'localeCompare',
+    ]),
+  },
+  {
+    type: 'number',
+    methods: new Set(['toFixed', 'toPrecision', 'toExponential', 'valueOf']),
+  },
+  {
+    type: 'Date',
+    methods: new Set([
+      'getTime', 'toISOString', 'toUTCString', 'toDateString', 'toLocaleString',
+      'getFullYear', 'getMonth', 'getDate', 'getDay', 'getHours', 'getMinutes',
+      'getSeconds', 'getMilliseconds', 'getTimezoneOffset', 'setFullYear',
+      'setMonth', 'setDate', 'setHours', 'setMinutes', 'setSeconds',
+    ]),
+  },
+];
+
+/**
+ * If every observed property is a call to methods unique to one builtin
+ * family, return that family as a weak last-resort type. Requires at least one
+ * method and ALL keys to belong to the same family, so a custom object with a
+ * coincidental `toUpperCase` plus `foo` is not narrowed.
+ */
+function uniqueBuiltinReceiverType(properties: ReadonlyMap<string, string>): string | undefined {
+  if (properties.size === 0) {
+    return undefined;
+  }
+  const keys = [...properties.keys()];
+  const METHOD_TYPE = '(...args: unknown[]) => unknown';
+  if (!keys.every((key) => properties.get(key) === METHOD_TYPE)) {
+    return undefined;
+  }
+  for (const family of UNIQUE_BUILTIN_METHODS) {
+    if (keys.every((key) => family.methods.has(key))) {
+      return family.type;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Collect every property-access chain rooted at `root` inside `body` as an
  * array of key paths (e.g. `root.a.b` -> ['a', 'b']). Symbol identity is
  * checked when available so a same-named inner variable is not mistaken for
@@ -697,6 +754,8 @@ interface Evidence {
   readonly constraints: string[];
   readonly properties: Map<string, string>;
   readonly elementShape: ShapeNode;
+  /** Nested property chains accessed on the binding (`o.a.b` -> a -> b). */
+  readonly shapeChain: ShapeNode;
   readonly arrayOwnMethods: Map<string, string>;
   objectLiteralInit: boolean;
   /** True when the binding was seen only in string-like contexts. Weak hint. */
@@ -709,6 +768,7 @@ function emptyEvidence(): Evidence {
     constraints: [],
     properties: new Map<string, string>(),
     elementShape: { children: new Map<string, ShapeNode>() },
+    shapeChain: { children: new Map<string, ShapeNode>() },
     arrayOwnMethods: new Map<string, string>(),
     objectLiteralInit: false,
     stringContext: false,
@@ -890,6 +950,21 @@ function isArrayTypeString(type: string): boolean {
   return type === 'unknown[]' || type.endsWith('[]') || type.startsWith('Array<') || type.startsWith('ReadonlyArray<');
 }
 
+/** Extract the element type from an array type string (`number[]`, `Array<number>`). */
+function arrayElementTypeOf(type: string | undefined): string | undefined {
+  if (type === undefined) {
+    return undefined;
+  }
+  const text = type.trim();
+  if (text.startsWith('Array<') || text.startsWith('ReadonlyArray<')) {
+    return splitTypeArguments(text)?.[0];
+  }
+  if (text.endsWith('[]')) {
+    return text.slice(0, -2);
+  }
+  return undefined;
+}
+
 /** Bitwise operators coerce both operands to int32 in JavaScript. */
 const BITWISE_OPERATORS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.AmpersandToken,
@@ -907,6 +982,21 @@ const RELATIONAL_OPERATORS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.LessThanEqualsToken,
   ts.SyntaxKind.GreaterThanEqualsToken,
 ]);
+
+/**
+ * If an operand of a relational comparison has a concrete orderable primitive
+ * type, both operands must share a comparable type. `let n = 0; n < x` proves
+ * `x` is numeric (TS requires both sides comparable), so narrowing `x` to
+ * `number` is sound. Returns undefined for `any`/`unknown`/unions so the caller
+ * keeps the conservative `number | string` estimate.
+ */
+function orderableOperandType(ctx: InferenceContext, node: ts.Expression): string | undefined {
+  const type = typeText(ctx, node);
+  if (type === 'number' || type === 'string' || type === 'bigint') {
+    return type;
+  }
+  return undefined;
+}
 
 /**
  * Built-in APIs whose parameter slots semantically require an object even
@@ -1132,6 +1222,33 @@ function constraintsFromReference(
   // recorded, is never downgraded to a plain `unknown` by a later read.
   if (ts.isPropertyAccessExpression(parent) && parent.expression === reference) {
     const grandparent = parent.parent;
+
+    // `o.a.b` / `o.a.b.c`: collect the full access chain so a parameter with
+    // no other evidence becomes a nested object shape instead of `{ a:
+    // unknown }` (which makes `o.a.b` a TS18046). Structural evidence only —
+    // the code genuinely dereferences those properties. The first-level record
+    // below still handles the simple `o.a` case and property writes.
+    if (ts.isPropertyAccessExpression(grandparent) && grandparent.expression === parent) {
+      // Walk outward to the longest property-access chain rooted at this
+      // reference (`o.a.b.c` -> ['a','b','c']), then unwind it in order.
+      let outermost: ts.PropertyAccessExpression = grandparent;
+      while (
+        ts.isPropertyAccessExpression(outermost.parent) &&
+        outermost.parent.expression === outermost
+      ) {
+        outermost = outermost.parent;
+      }
+      const chain: string[] = [];
+      let current: ts.Expression = outermost;
+      while (ts.isPropertyAccessExpression(current)) {
+        chain.unshift(current.name.text);
+        current = current.expression;
+      }
+      if (ts.isIdentifier(current) && current === reference) {
+        insertShapeChain(evidence.shapeChain, chain);
+      }
+    }
+
     const isMethodCall =
       ts.isCallExpression(grandparent) && grandparent.expression === parent;
     // `obj.field = expr`: the checker reports `any` for the read of a field
@@ -1277,7 +1394,20 @@ function constraintsFromReference(
     parent.expression === reference &&
     !ts.isObjectLiteralExpression(parent.parent)
   ) {
-    addConstraint(evidence, 'unknown[]');
+    // `Math.max(...xs)` / `Math.min(...xs)` declare a `...values: number[]`
+    // rest parameter. That is a definite contravariant constraint on every
+    // spread element — not a name heuristic (the signature is in lib.d.ts).
+    // Without it the element stays `unknown` and the spread is TS2345.
+    const call = parent.parent;
+    const calleeText =
+      ts.isCallExpression(call) && ts.isPropertyAccessExpression(call.expression)
+        ? call.expression.getText(call.getSourceFile())
+        : undefined;
+    if (calleeText === 'Math.max' || calleeText === 'Math.min') {
+      addConstraint(evidence, 'number[]');
+    } else {
+      addConstraint(evidence, 'unknown[]');
+    }
   }
 
   // `x[k]` (read or write) and `for (k in x)` both require x to be an
@@ -1289,6 +1419,17 @@ function constraintsFromReference(
     parent.expression === reference
   ) {
     addConstraint(evidence, INDEXABLE_OBJECT);
+  }
+  // `x[k]` / `x[k] = v`: the key itself must be a PropertyKey. This is a real
+  // JS language requirement (index expressions are coerced to string/symbol),
+  // not a name guess. Without it the key binding stays `unknown` and strict
+  // rejects the index (TS2538), even when the container was correctly inferred
+  // as Record<PropertyKey, unknown>.
+  if (
+    ts.isElementAccessExpression(parent) &&
+    parent.argumentExpression === reference
+  ) {
+    addConstraint(evidence, 'PropertyKey');
   }
   if (ts.isForInStatement(parent) && parent.expression === reference) {
     addConstraint(evidence, INDEXABLE_OBJECT);
@@ -1322,7 +1463,13 @@ function constraintsFromReference(
     // (number ∩ (number|string) = number) and still serves as a last-resort
     // estimate when there is no other evidence.
     if (RELATIONAL_OPERATORS.has(parent.operatorToken.kind)) {
-      addConstraint(evidence, 'number | string');
+      // Both operands of a relational comparison must be comparable. If the
+      // other side is a concrete orderable primitive, require the same type
+      // here instead of the generic `number | string` — otherwise `let n = 0;
+      // n < x` widens x to `number | string` and the comparison itself becomes
+      // illegal (TS2365).
+      const other = parent.left === reference ? parent.right : parent.left;
+      addConstraint(evidence, orderableOperandType(ctx, other) ?? 'number | string');
     }
     // `key in x` requires x to be an object (the left side is the key).
     if (
@@ -1635,13 +1782,49 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
             }
           }
         }
+        // A non-empty array literal that is later pushed/assigned with values
+        // of other types must widen its element type to their union. The checker
+        // fixes the element type at the literal (`const a = [1]` -> number[]),
+        // so `a.push('x')` would be TS2345. Container mutation is covariant
+        // evidence, so merge it with the literal's own element type — the same
+        // treatment the empty-array branch above already applies. `unshift` and
+        // index assignment are handled by collectMutationEvidence too.
+        let arrayLiteralHandled = false;
+        if (ts.isArrayLiteralExpression(init) && init.elements.length > 0) {
+          const elementType = typeText(ctx, init); // e.g. `number[]` / `Array<number>`
+          const element = arrayElementTypeOf(elementType);
+          if (element !== undefined) {
+            const writes = collectMutationEvidence(owner, 'collection', ctx);
+            const merged = mergeMutationEvidence(element, writes.filter((t) => t !== 'never'));
+            if (merged !== undefined && merged !== element) {
+              addSource(evidence, `Array<${merged}>`);
+              arrayLiteralHandled = true;
+            }
+          }
+        }
+
         // A CommonJS `require('mod')` initializer prints as a self-referential
         // type (`typeof util`, `path.PlatformPath`, `typeof fs`) that TypeScript
         // rejects (TS2502/TS2503). Re-express it as `typeof import("mod")`,
         // which keeps the real module type without naming the local binding.
-        const initializerType = requireModuleType(init) ?? typeText(ctx, init);
+        let initializerType = requireModuleType(init) ?? typeText(ctx, init);
+        // `new Map()` / `new Set()` / `new Promise(...)` without explicit type
+        // arguments get `Map<any, any>` etc. from the checker. A tool whose
+        // purpose is to eliminate `any` must not emit it: those slots are
+        // genuinely unknown, so normalize them. Only do this when the source
+        // has no explicit type arguments (`new Map<string, n>()` is the user's
+        // declared choice and must be kept).
+        if (
+          ts.isNewExpression(init) &&
+          init.typeArguments === undefined &&
+          initializerType !== undefined &&
+          /\bany\b/.test(initializerType)
+        ) {
+          initializerType = initializerType.replace(/\bany\b/g, 'unknown');
+        }
         const bindingName = ts.isIdentifier(owner.name) ? owner.name.text : undefined;
         if (
+          !arrayLiteralHandled &&
           initializerType !== undefined &&
           !(bindingName !== undefined && isSelfReferentialType(initializerType, bindingName))
         ) {
@@ -1695,7 +1878,20 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
     for (const call of callsOf(functionNode, ctx)) {
       const argument = call.arguments[index];
       if (argument !== undefined) {
-        addSource(evidence, typeText(ctx, argument));
+        // An unannotated callback argument (`apply(s => s.length, 'x')`) has
+        // no useful checker type — its params are implicit `any`, so typeText
+        // yields `(s: any) => any`. Instead of injecting `any`, build a
+        // signature from each callback parameter's own usage-derived type
+        // (e.g. `s.length` -> `{ length: unknown }`). This gives the higher-
+        // order parameter a precise callable type that the callback argument
+        // satisfies, instead of a generic `(...args: unknown[])` that cannot
+        // accept a narrowed callback (TS2345).
+        const callbackSig = opaqueCallbackSignature(argument, ctx);
+        if (callbackSig !== undefined) {
+          addSource(evidence, callbackSig);
+        } else {
+          addSource(evidence, typeText(ctx, argument));
+        }
       }
     }
   }
@@ -1715,6 +1911,42 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
   }
 
   return evidence;
+}
+
+/**
+ * Build a callable signature for an unannotated callback argument from its
+ * parameters' usage-derived types. The checker reports implicit-any for these
+ * parameters (`(s: any) => any`), which is information-free; the inference
+ * table (populated from member accesses inside the callback body) has the real
+ * shape. Returns undefined when no parameter has a concrete inferred type.
+ */
+function opaqueCallbackSignature(node: ts.Expression, ctx: InferenceContext): string | undefined {
+  if (!ts.isArrowFunction(node) && !ts.isFunctionExpression(node)) {
+    return undefined;
+  }
+  if (node.parameters.length === 0) {
+    return undefined;
+  }
+  const params: string[] = [];
+  for (const param of node.parameters) {
+    if (param.type !== undefined) {
+      return undefined; // annotated callback: let typeText use the real type
+    }
+    const apparent = ctx.checker.getTypeAtLocation(param);
+    if ((apparent.flags & ts.TypeFlags.Any) === 0) {
+      return undefined; // has a real contextual type: not opaque
+    }
+    // Compute directly: a call argument is visited before its callback's
+    // parameters are entered into the table, so reading the table here would
+    // see `undefined` on the first fixed-point pass.
+    const inferred = mergeEvidence(collectEvidence(param, ctx)).type;
+    params.push(
+      param.dotDotDotToken
+        ? `...${param.name.getText()}: ${inferred ?? 'unknown'}[]`
+        : `${param.name.getText()}: ${inferred ?? 'unknown'}`,
+    );
+  }
+  return `( ${params.join(', ')} ) => unknown`;
 }
 
 /**
@@ -1890,6 +2122,30 @@ function mergeEvidence(evidence: Evidence): {
   } else if (allowed !== undefined && allowed.length > 0) {
     // No observed values: the required argument types are our best estimate.
     members = allowed;
+  } else if (
+    evidence.elementShape.children.size > 0 &&
+    [...evidence.properties.keys()].every((key) => ITERATION_METHODS.has(key))
+  ) {
+    // An iteration callback (`xs.map(it => it.a.b)`, `xs.forEach`, ...) proves
+    // the receiver is an array whose elements have the accessed shape — even
+    // without an `Array.isArray` guard. The callback-body property chains are
+    // structural evidence, so prefer `Array<shape>` over the method-shape
+    // ({ map: (...)=>unknown }) that a bare `.map` access would otherwise emit.
+    members = [`Array<${renderShapeNode(evidence.elementShape)}>`];
+    weak = true;
+  } else if (evidence.shapeChain.children.size > 0) {
+    // Last resort: synthesize a nested object shape from full property chains
+    // (`o.a.b` -> `{ a: { b: unknown; }; }`). Prefer this over the flat
+    // properties map so deep dereferences don't stop at the first level.
+    members = [renderShapeNode(evidence.shapeChain)];
+    weak = true;
+  } else if (uniqueBuiltinReceiverType(evidence.properties) !== undefined) {
+    // Last resort: the binding was only observed calling methods unique to a
+    // builtin family (e.g. `s.toUpperCase()`), so narrow to that primitive.
+    // Weak, so a later concrete source can refine it; guarded so coincidental
+    // same-named methods on a custom shape are never narrowed.
+    members = [uniqueBuiltinReceiverType(evidence.properties) as string];
+    weak = true;
   } else if (evidence.properties.size > 0) {
     // Last resort: synthesize an object shape from accessed properties.
     members = [renderPropertyShape(evidence.properties)];
@@ -2162,6 +2418,14 @@ export interface UsageResolver {
   readonly getSourceFile: (fileName: string) => ts.SourceFile | undefined;
   readonly infer: (owner: ts.Node) => string | undefined;
   /**
+   * Best-effort type text for an arbitrary expression, using the same checker
+   * and inference table as `infer`. Used where the converter needs the type of
+   * an initializer/assignment value (e.g. `this.field = <expr>`) that is not
+   * itself a declaration owner. Returns undefined when no concrete type can be
+   * named, so callers can keep the binding un-annotated rather than guess.
+   */
+  readonly typeOf: (node: ts.Node) => string | undefined;
+  /**
    * True if `param` has no contextual type and resolves to `any`, i.e. the
    * parameter would trigger `noImplicitAny` (TS7006). Used to annotate only
    * callbacks that genuinely lack contextual typing, without breaking
@@ -2202,6 +2466,39 @@ function isInferredArrayElementParameter(
   }
   const inferred = ctx.table.declarations.get(declaration);
   return inferred !== undefined && inferred.startsWith('Array<');
+}
+
+/**
+ * True when `param` is a callback argument to a standard array method whose
+ * receiver will be concretely typed after conversion (e.g. `nums: number[]`
+ * from a JSDoc rest param, then `nums.reduce((a, b) => ...)`). The rewritten
+ * source gives `nums` its array type, and lib.d.ts then supplies contextual
+ * types for the callback parameters — so annotating them `unknown` would
+ * override real contextual typing and reintroduce TS18046/TS2322.
+ */
+function callbackReceiverIsTypedArray(param: ts.ParameterDeclaration, ctx: InferenceContext): boolean {
+  const func = param.parent;
+  if (!isFunctionLike(func) || !ts.isCallExpression(func.parent)) {
+    return false;
+  }
+  const call = func.parent;
+  if (!call.arguments.some((arg) => arg === func)) {
+    return false;
+  }
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee) || !ARRAY_BUILTIN_MEMBERS.has(callee.name.text)) {
+    return false;
+  }
+  let symbol = ctx.checker.getSymbolAtLocation(callee.expression);
+  if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+    symbol = ctx.checker.getAliasedSymbol(symbol);
+  }
+  const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+  if (declaration === undefined) {
+    return false;
+  }
+  const inferred = ctx.table.declarations.get(declaration);
+  return inferred !== undefined && isArrayTypeString(inferred);
 }
 
 /**
@@ -2250,6 +2547,7 @@ export function createUsageResolver(
   return {
     getSourceFile: (fileName) => program.getSourceFile(fileName),
     infer: (owner) => ownerType(ctx.table, owner),
+    typeOf: (node) => typeText(ctx, node as ts.Expression),
     isImplicitAnyParameter: (param) => {
       // A contextual type (even `any`) means the parameter is already typed by
       // the callee, and annotating it could break inference. Only when there is
@@ -2265,6 +2563,9 @@ export function createUsageResolver(
       // contextual element type. Annotating it `unknown` would override that
       // and reintroduce TS18046, so leave it unannotated.
       if (isInferredArrayElementParameter(param, ctx)) {
+        return false;
+      }
+      if (callbackReceiverIsTypedArray(param, ctx)) {
         return false;
       }
       if (isCustomArrayMethodCallback(param, ctx)) {

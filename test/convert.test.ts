@@ -131,7 +131,25 @@ class Box {
 }
 `;
   const { output } = convertSource('class.js', source, { banner: false });
-  assert.match(output, /class Box \{\s+label: string;/);
+  assert.match(output, /class Box \{\s+label!?: string;/);
+  assert.equal(checkStrict('class.ts', output).ok, true);
+});
+
+test('promotes this.x = value to a class field without requiring JSDoc', () => {
+  const source = `
+class Counter {
+  constructor() {
+    this.count = 0;
+    this.label = 'a';
+  }
+  get() {
+    return this.count;
+  }
+}
+`;
+  const { output } = convertSource('class.js', source, { banner: false });
+  assert.match(output, /count!?: number;/);
+  assert.match(output, /label!?: string;/);
   assert.equal(checkStrict('class.ts', output).ok, true);
 });
 

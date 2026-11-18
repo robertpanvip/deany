@@ -218,6 +218,43 @@
 
 **为何字段是可选**：解构源默认 `= {}`，字段确实可能缺失，工具推 `signal?` 是忠实的；真实库用 `signal?.aborted` 可选链访问，strict-clean。`value` 这类无成员访问、无默认值的字段仍保持缺失/unknown，符合「不臆测」原则。
 
+## 用户 84 用例测试报告修复（@deany/core 0.1.2）
+
+用户提供 84 用例报告（63 通过 / 21 失败），逐项验证后修复 12 项（含 1 个阻断 bug）。所有修复均经最小复现确认 + strict 校验 + 回归测试，测试数 157→173。
+
+### 阻断级：--check 门禁在 Windows 恒通过
+
+`checkStrict` 用 `diagnostic.file.fileName === resolved` 过滤诊断，Windows 上 TS 内部 fileName 是正斜杠、`ts.sys.resolvePath` 是反斜杠，永不相等 → 全部诊断被过滤 → 恒 `ok:true`。改为 **SourceFile 对象引用比较**（`d.file === target`），平台无关。补非归一化文件名回归测试。
+
+### 确凿证据类
+
+- **1.1 this.x 提升为类字段**：`processThisAssignment` 原来只在有 JSDoc 时触发；改为无 JSDoc 时从 RHS 推断（resolver.typeOf，缺失时用字面量兜底），统一用 `!:` definite assignment（JS 动态赋值 TS 建模不到）。新增 `UsageResolver.typeOf`。高影响：class 构造器赋值字段全线 TS2339 消除。
+- **1.3 非空数组 push 合并**：原仅空数组 `[]` 收集变异证据；非空中也收集并与字面量元素类型合并为联合（`[1]; a.push('x')` → `Array<number|string>`）。新增 `arrayElementTypeOf`。
+- **1.8 关系比较**：`n < x`（n 已知 number）原把 x 推成 `number|string` 致 TS2365；改为另一侧为具体可比较原始类型时用它作约束，两侧都未知才回退 `number|string`。
+- **1.9 下标键**：`x[k]` 原只约束容器 x，k 留 unknown 致 TS2538；给 argumentExpression 加 `PropertyKey` 约束（容器已是 `Record<PropertyKey,unknown>`，无 TS7053 风险）。
+
+### 深层属性链
+
+- **1.4 属性链深度**：`o.a.b.c` 原只推一层 `{a:unknown}`；新增 `shapeChain: ShapeNode` 收集以 owner 为根的最长访问链，mergeEvidence last-resort 渲染嵌套 `{a:{b:{c:unknown}}}`。
+- **1.5 无守卫迭代方法**：`xs.map(it=>it.a.b)` 无 Array.isArray 时退化为方法形状；elementShape 非空且属性全是 ITERATION_METHODS 时，last-resort 直接用 `Array<shape>`。map/forEach/filter 全部清零。
+
+### 回调 / 高阶函数
+
+- **1.6 reduce 回调**：`nums` 有 JSDoc `{...number}`（转 `number[]`），但 checker 视角无上下文，回调被硬标 unknown 致 TS18046。新增 AST 检测"接收者有 JSDoc 数组类型"时跳过回调参数注解，让 TS 用转换后的上下文类型。
+- **1.7 高阶函数**：`apply(fn,v)` 有调用点时 fn 从未标注箭头退化成 `(s:any)=>any`（比无调用点更差）。改为：opaque 回调实参不注入 any，而用其参数 usage 推断构造精确签名 `{length:unknown}`；回调参数注解也优先用 resolver.infer 而非 defaultType。fn 与回调实参精确匹配。
+
+### 内建类型反推（用户明确解禁原 C 档方法名臆测）
+
+- **1.2 内建容器 any**：`new Map()/Set()/WeakMap()/Promise()` 无显式类型参数时 checker 给 `Map<any,any>`，与 de-any 宗旨冲突；无 typeArguments 时把 any→unknown。显式类型参数与 `new Date()` 不受影响。
+- **1.10 Math.max 展开**：`Math.max(...xs)` 的形参 `...values:number[]` 是确定逆变约束；给 xs 加 `number[]` 约束（lib.d.ts 签名，非臆测）。
+- **1.11 lib 唯一方法反推**：`toUpperCase`→string、`toFixed`→number、`getTime`→Date 等——方法在 lib.d.ts 中只属一个 family。**弱证据 + 严格守卫**：仅当 binding 无任何 source 且所有观测属性都是同一 family 的唯一方法（且值为 method 签名）时收窄；有调用点具体类型或非唯一方法共存时不收窄，避免误伤自定义同名方法。
+
+### 已知边界（未修，记录避免重复评估）
+
+- 1.2 的 Map/Set 键值精确反推（`m.set('k',1)` → `Map<string,number>`）：容器变异证据目前只覆盖数组，属增强非缺陷。
+- 1.4 叶子参与 `+`（`o.a.b + o.x.y`）：深层形状已推对，但叶子 unknown 参与算术是本轮之外的问题。
+- 报告第 2 节 6 项（无调用点 add、递归、switch typeof、可选链链深、`require('node:path')`、esm-export-infer）：均为已确认取舍或门禁限制。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。
