@@ -607,6 +607,33 @@ function f(o: any) { o.toUpperCase(); o.customThing(); }
   assert.doesNotMatch(output, /o: string/);
 });
 
+test('does not narrow a lib-unique method whose return signature contradicts the builtin', () => {
+  // `toUpperCase` is unique to string in lib.d.ts and returns string. If the
+  // call site expects a number, it cannot be the builtin — a custom object
+  // with a coincidentally named method. Synthesize a signature returning the
+  // observed type (so strict still passes) but never claim the receiver is
+  // string/number.
+  const { output } = infer(`
+function upper(x: any): number { return x.toUpperCase(); }
+function fixed(x: any): number { return x.toFixed(2); }
+function assigned(x: any) { const n: number = x.toUpperCase(); return n; }
+`);
+  assert.doesNotMatch(output, /x: string/);
+  assert.doesNotMatch(output, /x: number/);
+  assert.match(output, /upper\(x: \{ toUpperCase: \(\.\.\.args: unknown\[\]\) => number; \}\)/);
+  assert.match(output, /fixed\(x: \{ toFixed: \(\.\.\.args: unknown\[\]\) => number; \}\)/);
+  assert.match(output, /\(\.\.\.args: unknown\[\]\) => number/);
+});
+
+test('still narrows a lib-unique method when the return signature agrees with the builtin', () => {
+  const { output } = infer(`
+function upper(x: any): string { return x.toUpperCase(); }
+function fixed(x: any): string { return x.toFixed(2); }
+`);
+  assert.match(output, /upper\(x: string\)/);
+  assert.match(output, /fixed\(x: number\)/);
+});
+
 test('keeps an object literal with its own toUpperCase as a shape, not string', () => {
   const { output } = infer(`
 const only: any = { toUpperCase() { return 'x'; } };

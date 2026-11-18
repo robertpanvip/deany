@@ -676,12 +676,47 @@ const UNIQUE_BUILTIN_METHODS: ReadonlyArray<{
 ];
 
 /**
- * If every observed property is a call to methods unique to one builtin
- * family, return that family as a weak last-resort type. Requires at least one
- * method and ALL keys to belong to the same family, so a custom object with a
- * coincidental `toUpperCase` plus `foo` is not narrowed.
+ * The real lib return type of each lib-unique method. A method name being
+ * unique is necessary but not sufficient: the observed return context must
+ * also agree with the builtin's return type. A binding observed calling
+ * `toUpperCase()` where a `number` is expected is NOT a string — it is some
+ * custom object with a coincidentally named method that returns a number.
  */
-function uniqueBuiltinReceiverType(properties: ReadonlyMap<string, string>): string | undefined {
+const BUILTIN_METHOD_RETURN: ReadonlyMap<string, string> = new Map([
+  ['toUpperCase', 'string'], ['toLowerCase', 'string'], ['trim', 'string'],
+  ['trimStart', 'string'], ['trimEnd', 'string'], ['charAt', 'string'],
+  ['substring', 'string'], ['substr', 'string'], ['repeat', 'string'],
+  ['padStart', 'string'], ['padEnd', 'string'],
+  ['charCodeAt', 'number'], ['indexOf', 'number'], ['lastIndexOf', 'number'],
+  ['localeCompare', 'number'],
+  ['startsWith', 'boolean'], ['endsWith', 'boolean'], ['includes', 'boolean'],
+  ['split', 'string[]'],
+  ['toFixed', 'string'], ['toPrecision', 'string'], ['toExponential', 'string'],
+  ['valueOf', 'number'],
+  ['getTime', 'number'], ['getFullYear', 'number'], ['getMonth', 'number'],
+  ['getDate', 'number'], ['getDay', 'number'], ['getHours', 'number'],
+  ['getMinutes', 'number'], ['getSeconds', 'number'], ['getMilliseconds', 'number'],
+  ['getTimezoneOffset', 'number'], ['setFullYear', 'number'], ['setMonth', 'number'],
+  ['setDate', 'number'], ['setHours', 'number'], ['setMinutes', 'number'],
+  ['setSeconds', 'number'],
+  ['toISOString', 'string'], ['toUTCString', 'string'], ['toDateString', 'string'],
+  ['toLocaleString', 'string'],
+]);
+
+/** Observed contextual return types that carry no information — ignore them. */
+const VAGUE_RETURN_TYPES = new Set(['any', 'unknown', 'never', 'void', '']);
+
+/**
+ * If every observed property is a call to methods unique to one builtin
+ * family — AND every observed return context agrees with that method's real
+ * lib return type — return the family as a weak last-resort type. Requires at
+ * least one method and ALL keys to belong to the same family, so a custom
+ * object with a coincidental `toUpperCase` plus `foo` is not narrowed.
+ */
+function uniqueBuiltinReceiverType(
+  properties: ReadonlyMap<string, string>,
+  methodReturnTypes: ReadonlyMap<string, readonly string[]>,
+): string | undefined {
   if (properties.size === 0) {
     return undefined;
   }
@@ -691,7 +726,23 @@ function uniqueBuiltinReceiverType(properties: ReadonlyMap<string, string>): str
     return undefined;
   }
   for (const family of UNIQUE_BUILTIN_METHODS) {
-    if (keys.every((key) => family.methods.has(key))) {
+    if (!keys.every((key) => family.methods.has(key))) {
+      continue;
+    }
+    // Signature check: every contextual return type observed at a call site
+    // must match the builtin method's real return type. A mismatch means the
+    // method is not the builtin one — e.g. `toUpperCase()` used as a number.
+    const signatureAgrees = keys.every((key) => {
+      const builtinReturn = BUILTIN_METHOD_RETURN.get(key);
+      if (builtinReturn === undefined) {
+        return false;
+      }
+      const observed = methodReturnTypes.get(key) ?? [];
+      return observed.every((text) =>
+        VAGUE_RETURN_TYPES.has(text) || text === builtinReturn,
+      );
+    });
+    if (signatureAgrees) {
       return family.type;
     }
   }
@@ -757,6 +808,14 @@ interface Evidence {
   /** Nested property chains accessed on the binding (`o.a.b` -> a -> b). */
   readonly shapeChain: ShapeNode;
   readonly arrayOwnMethods: Map<string, string>;
+  /**
+   * Contextual return types observed at call sites of lib-unique methods
+   * (e.g. `s.toUpperCase()` used where `number` is expected). Used to reject
+   * the weak builtin narrowing when the observed return context contradicts
+   * the method's real lib return type — a coincidental same-named method is
+   * not the builtin one.
+   */
+  readonly methodReturnTypes: Map<string, string[]>;
   objectLiteralInit: boolean;
   /** True when the binding was seen only in string-like contexts. Weak hint. */
   stringContext: boolean;
@@ -770,6 +829,7 @@ function emptyEvidence(): Evidence {
     elementShape: { children: new Map<string, ShapeNode>() },
     shapeChain: { children: new Map<string, ShapeNode>() },
     arrayOwnMethods: new Map<string, string>(),
+    methodReturnTypes: new Map<string, string[]>(),
     objectLiteralInit: false,
     stringContext: false,
   };
@@ -1262,6 +1322,36 @@ function constraintsFromReference(
     const previous = evidence.properties.get(parent.name.text);
     if (isMethodCall || previous === METHOD_TYPE) {
       evidence.properties.set(parent.name.text, METHOD_TYPE);
+      // Record the contextual (expected) return type of the call, so the
+      // lib-unique narrowing can verify the method's signature matches the
+      // builtin. `getContextualType` yields number/string for annotated returns
+      // and variable declarations, but nothing for bare/chained calls — those
+      // stay unconstrained and still allow the weak narrowing.
+      if (isMethodCall) {
+        const contextual = ctx.checker.getContextualType(grandparent as ts.CallExpression);
+        if (contextual !== undefined) {
+          const text = ctx.checker.typeToString(contextual);
+          const list = evidence.methodReturnTypes.get(parent.name.text) ?? [];
+          if (!list.includes(text)) {
+            list.push(text);
+          }
+          evidence.methodReturnTypes.set(parent.name.text, list);
+          // If the observed return context contradicts the builtin method's
+          // real return type, this is NOT the builtin method (it is a custom
+          // same-named method). Replace the generic METHOD_TYPE with a
+          // signature returning the observed type: this both blocks the weak
+          // narrowing (value is no longer METHOD_TYPE) and keeps the call
+          // type-correct under strict mode (return is `text`, not `unknown`).
+          const builtinReturn = BUILTIN_METHOD_RETURN.get(parent.name.text);
+          if (
+            builtinReturn !== undefined &&
+            !VAGUE_RETURN_TYPES.has(text) &&
+            text !== builtinReturn
+          ) {
+            evidence.properties.set(parent.name.text, `(...args: unknown[]) => ${text}`);
+          }
+        }
+      }
     } else if (isPropertyWrite) {
       evidence.properties.set(
         parent.name.text,
@@ -2139,12 +2229,17 @@ function mergeEvidence(evidence: Evidence): {
     // properties map so deep dereferences don't stop at the first level.
     members = [renderShapeNode(evidence.shapeChain)];
     weak = true;
-  } else if (uniqueBuiltinReceiverType(evidence.properties) !== undefined) {
+  } else if (
+    uniqueBuiltinReceiverType(evidence.properties, evidence.methodReturnTypes) !== undefined
+  ) {
     // Last resort: the binding was only observed calling methods unique to a
     // builtin family (e.g. `s.toUpperCase()`), so narrow to that primitive.
     // Weak, so a later concrete source can refine it; guarded so coincidental
-    // same-named methods on a custom shape are never narrowed.
-    members = [uniqueBuiltinReceiverType(evidence.properties) as string];
+    // same-named methods on a custom shape are never narrowed, and guarded so
+    // a return context contradicting the builtin signature rejects it.
+    members = [
+      uniqueBuiltinReceiverType(evidence.properties, evidence.methodReturnTypes) as string,
+    ];
     weak = true;
   } else if (evidence.properties.size > 0) {
     // Last resort: synthesize an object shape from accessed properties.
