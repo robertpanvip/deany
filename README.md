@@ -1,6 +1,8 @@
-# jsdoc2strict-ts
+# deany
 
-把带 JSDoc 的 JavaScript 转成**严格 TypeScript**，产出可直接交给 `tsc --strict` / [scriptc](https://scriptc.dev/) 编译的 `.ts` 源码。
+**deany**（de-any，去掉 `any`）把带 JSDoc 的 JavaScript、无 JSDoc 的纯 JS，以及满是显式 `any` 的 TypeScript，转为由真实使用证据推断出的**严格 TypeScript**，产出可直接交给 `tsc --strict` / [scriptc](https://scriptc.dev/) 编译的 `.ts` 源码。
+
+> CLI 命令为 `deany`；旧的 `jsdoc2ts` 保留为向后兼容别名，行为完全一致。
 
 核心思路：用 TypeScript Compiler API 解析 JS，在原源码位置上插入类型注解（保留原有代码与注释），并把 JSDoc 的松散类型语法归一化为 TS 类型语法。所有没有类型来源的槽位默认补 `unknown`，避免隐式 `any` 掉进 scriptc 的 dynamic tier。
 
@@ -14,7 +16,7 @@ npm run build
 CLI：
 
 ```bash
-node bin/jsdoc2ts.js <input.js|dir> --out <output.ts|dir> [options]
+deany <input.js|dir> --out <output.ts|dir> [options]
 ```
 
 | 选项 | 说明 |
@@ -33,14 +35,14 @@ node bin/jsdoc2ts.js <input.js|dir> --out <output.ts|dir> [options]
 示例：
 
 ```bash
-node bin/jsdoc2ts.js examples/input.js -o examples/output.ts --check --init-config
+deany examples/input.js -o examples/output.ts --check --init-config
 npx tsc -p examples/tsconfig.json --noEmit
 ```
 
 目录批量转换：
 
 ```bash
-node bin/jsdoc2ts.js src --out ts-src --check --init-config
+deany src --out ts-src --check --init-config
 ```
 
 ## 反推并替换已有的 `any`（infer-any）
@@ -48,8 +50,8 @@ node bin/jsdoc2ts.js src --out ts-src --check --init-config
 适用于**已经是 TS、但到处写着 `any`** 的代码：从使用点反推真实类型，再原位替换。
 
 ```bash
-node bin/jsdoc2ts.js infer-any src --out ts-inferred --project tsconfig.json --check
-node bin/jsdoc2ts.js infer-any app.ts -o app.inferred.ts --check
+deany infer-any src --out ts-inferred --project tsconfig.json --check
+deany infer-any app.ts -o app.inferred.ts --check
 ```
 
 证据来源：
@@ -198,10 +200,10 @@ CLI：
 
 ## JS 里没有 JSDoc 的隐式 any
 
-JS 文件不需要写 JSDoc 也能推断：`jsdoc2ts` 默认会对**没有 JSDoc 类型**的声明，先用使用证据（赋值、调用点、算术运算、数组元素、`return` 等）反推类型；函数体没有带值 `return` 时推断为 `void`（async 为 `Promise<void>`），只有其余推不出类型的声明才回退 `unknown`。
+JS 文件不需要写 JSDoc 也能推断：`deany` 默认会对**没有 JSDoc 类型**的声明，先用使用证据（赋值、调用点、算术运算、数组元素、`return` 等）反推类型；函数体没有带值 `return` 时推断为 `void`（async 为 `Promise<void>`），只有其余推不出类型的声明才回退 `unknown`。
 
 ```bash
-node bin/jsdoc2ts.js examples/js-infer-input.js -o examples/js-infer-output.ts --check
+deany examples/js-infer-input.js -o examples/js-infer-output.ts --check
 ```
 
 输入（几乎没有 JSDoc）：
@@ -235,7 +237,7 @@ JSDoc 始终优先于推断。想关掉这个行为，用 `--no-infer-usage`。
 ## 库用法
 
 ```ts
-import { convertSource, checkStrict, strictTsConfig } from 'jsdoc2strict-ts';
+import { convertSource, checkStrict, strictTsConfig } from 'deany';
 
 const { output, diagnostics } = convertSource('a.js', source, {
   unknownForLoose: true,
@@ -249,7 +251,7 @@ if (!check.ok) {
 }
 
 // 反推已有 TS 里的 any
-import { inferAnyInProject, readCompilerOptions } from 'jsdoc2strict-ts';
+import { inferAnyInProject, readCompilerOptions } from 'deany';
 const options = readCompilerOptions('tsconfig.json');
 const inferred = inferAnyInProject(['src/a.ts'], options);
 for (const file of inferred) {

@@ -8,11 +8,13 @@ import { convertPath, collectJsFiles, collectTsFiles } from './fs.js';
 import { inferAnyInProject, readCompilerOptions, createUsageResolver } from './inferAny.js';
 import type { ConvertOptions } from './types.js';
 
-const USAGE = `jsdoc2ts — convert JSDoc-annotated JavaScript into strict TypeScript
+const USAGE = `deany — eliminate any: infer strict TypeScript from JSDoc and real usage
 
 Usage:
-  jsdoc2ts <input.js|dir> [options]
-  jsdoc2ts infer-any <input.ts|dir> --out <path> [options]
+  deany <input.js|dir> [options]
+  deany infer-any <input.ts|dir> --out <path> [options]
+
+  (jsdoc2ts is a backwards-compatible alias for deany)
 
 Options (conversion):
   -o, --out <path>       Output .ts file (single input) or directory (input directory)
@@ -36,8 +38,8 @@ Options (infer-any):
   -h, --help             Show this help
 
 Examples:
-  jsdoc2ts src --out ts-src --check --init-config
-  jsdoc2ts infer-any src --out ts-inferred --project tsconfig.json --check
+  deany src --out ts-src --check --init-config
+  deany infer-any src --out ts-inferred --project tsconfig.json --check
 `;
 
 type MutableOptions = { -readonly [K in keyof ConvertOptions]?: ConvertOptions[K] };

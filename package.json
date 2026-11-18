@@ -1,9 +1,10 @@
 {
-  "name": "jsdoc2strict-ts",
+  "name": "deany",
   "version": "0.1.0",
-  "description": "Convert JSDoc-annotated JavaScript into strict TypeScript that is ready for scriptc / tsc --strict.",
+  "description": "Infer strict TypeScript types from JSDoc and real usage evidence, eliminating any/implicit-any so code is ready for scriptc / tsc --strict.",
   "type": "module",
   "bin": {
+    "deany": "./bin/deany.js",
     "jsdoc2ts": "./bin/jsdoc2ts.js"
   },
   "main": "./dist/index.js",
@@ -23,15 +24,17 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test test/*.test.ts",
-    "demo": "npm run build && node bin/jsdoc2ts.js examples/input.js -o examples/output.ts --check",
-    "infer-demo": "npm run build && node bin/jsdoc2ts.js infer-any examples/any-input.ts -o examples/any-output.ts --check",
-    "js-infer-demo": "npm run build && node bin/jsdoc2ts.js examples/js-infer-input.js -o examples/js-infer-output.ts --check"
+    "demo": "npm run build && node bin/deany.js examples/input.js -o examples/output.ts --check",
+    "infer-demo": "npm run build && node bin/deany.js infer-any examples/any-input.ts -o examples/any-output.ts --check",
+    "js-infer-demo": "npm run build && node bin/deany.js examples/js-infer-input.js -o examples/js-infer-output.ts --check"
   },
   "keywords": [
+    "deany",
     "jsdoc",
     "typescript",
     "strict",
     "scriptc",
+    "any-inference",
     "js-to-ts"
   ],
   "license": "Apache-2.0",
