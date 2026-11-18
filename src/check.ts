@@ -18,16 +18,12 @@ function formatDiagnostic(diagnostic: ts.Diagnostic): string {
 }
 
 /**
- * Type-check generated TypeScript in memory under full `strict` mode.
- * No files are written, so this is safe to use as a conversion gate.
- */
-/**
  * Diagnostics that indicate a missing ambient/global type rather than a real
- * error in the generated code. TypeScript 6 stopped auto-including every
+ * error in the generated code. TypeScript 6 no longer auto-includes every
  * `@types/*` package, so Node globals (`module`, `require`, `process`,
- * `NodeJS.*`) are no longer visible unless `@types/node` is referenced. deany
- * emits those globals verbatim when converting Node JS, so treating them as
- * errors would make the strict gate fail spuriously under TS6.
+ * `NodeJS.*`) are not visible unless `@types/node` is referenced. deany emits
+ * those globals verbatim when converting Node JS, so treating them as errors
+ * would make the strict gate fail spuriously.
  */
 const AMBIENT_MISSING_CODES = new Set<number>([
   2304, // Cannot find name 'X'.
@@ -113,10 +109,10 @@ export function checkStrict(
   };
 
   let diagnostics = collectDiagnostics(fileName, output, options);
-  // TS6+ no longer auto-includes @types/*. If the only failures are missing
-  // Node globals and @types/node is resolvable from this file, retry once with
-  // it explicitly referenced. Under TS5.9 the first pass already sees these
-  // globals, so this branch is a no-op there.
+  // TS6 no longer auto-includes @types/*. If the failures include missing Node
+  // globals and @types/node is resolvable from this file, retry once with it
+  // explicitly referenced. The extra pass is skipped when node types are
+  // already visible (e.g. the caller supplied `types` via extraOptions).
   if (
     diagnostics.some(mentionsNodeGlobal) &&
     options.types === undefined &&

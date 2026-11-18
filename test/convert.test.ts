@@ -242,10 +242,9 @@ test('checkStrict still reports diagnostics when the file name is not normalized
 
 test('checkStrict accepts Node globals emitted verbatim from JS', () => {
   // deany keeps Node globals (module.exports / require / process) when
-  // converting Node JS. TypeScript 6 stopped auto-including @types/*, so the
+  // converting Node JS. TypeScript 6 no longer auto-includes @types/*, so the
   // strict gate must explicitly pull in node types when they are resolvable,
-  // otherwise these emits are reported as spurious TS2591 errors. This passes
-  // naturally on TS5.9 (auto-discovery) and exercises the TS6 fallback.
+  // otherwise these emits are reported as spurious TS2591 errors.
   const output = [
     `declare const value: string;`,
     `const fs = require('fs');`,
