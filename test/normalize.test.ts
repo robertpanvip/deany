@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULT_OPTIONS } from '../src/types.js';
-import { normalizeJsDocType, normalizeRestType } from '../src/normalize.js';
+import { extractCustomTypeNames, normalizeJsDocType, normalizeRestType } from '../src/normalize.js';
 
 test('JSDoc generic dots become TypeScript generics', () => {
   assert.equal(normalizeJsDocType('Array.<string>', DEFAULT_OPTIONS), 'Array<string>');
@@ -83,4 +83,21 @@ test('capitalized JSDoc primitive names normalize to TS keywords', () => {
   // Nested in a generic: each argument is normalized recursively.
   assert.equal(normalizeJsDocType('Array.<String>', DEFAULT_OPTIONS), 'Array<string>');
   assert.equal(normalizeJsDocType('Promise.<Number>', DEFAULT_OPTIONS), 'Promise<number>');
+});
+
+
+test('TS built-in utility types are not emitted as dangling fallback aliases', () => {
+  const typeText = '(receiver: ThisParameterType<typeof RegExp.prototype.exec>, ...args: Parameters<typeof RegExp.prototype.exec>) => ReturnType<typeof RegExp.prototype.exec>';
+  assert.deepEqual(extractCustomTypeNames(typeText, new Set(), new Set()), []);
+  // Other lib utility / intrinsic string types are likewise not custom.
+  assert.deepEqual(
+    extractCustomTypeNames(
+      'ConstructorParameters<T> | Uppercase<S> | ReadonlyArray<NoInfer<V>> | OmitThisParameter<F>',
+      new Set(),
+      new Set(['T', 'S', 'V', 'F']),
+    ),
+    [],
+  );
+  // A genuinely undefined capitalized type is still reported for fallback.
+  assert.deepEqual(extractCustomTypeNames('Missing Foo', new Set(), new Set()).sort(), ['Foo', 'Missing']);
 });

@@ -266,6 +266,12 @@ const BUILTIN_TYPE_NAMES = new Set([
   'WeakMap', 'WeakSet', 'Date', 'RegExp', 'Error', 'JSON', 'Math', 'Reflect', 'Proxy',
   'Record', 'Partial', 'Required', 'Readonly', 'Pick', 'Omit', 'Exclude', 'Extract',
   'NonNullable', 'ReturnType', 'Parameters', 'InstanceType', 'ThisType', 'Awaited',
+  // Utility types from lib.es5.d.ts / lib.es2015 / intrinsic string types. Missing
+  // any of these makes convert.ts emit a bogus `type X = unknown;` fallback alias
+  // that collides with the lib declaration (TS2300) and breaks generic use (TS2315).
+  'ThisParameterType', 'OmitThisParameter', 'ConstructorParameters',
+  'Uppercase', 'Lowercase', 'Capitalize', 'Uncapitalize', 'ReadonlyArray',
+  'This', 'NoInfer',
   'Iterable', 'Iterator', 'AsyncIterable', 'Generator', 'AsyncGenerator',
   'String', 'Number', 'Boolean', 'Symbol', 'BigInt', 'Uint8Array', 'ArrayBuffer',
   // DOM / Node globals (provided by lib, not JSDoc typedefs)

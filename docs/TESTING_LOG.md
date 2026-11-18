@@ -150,6 +150,30 @@
 
 **未修（固有限制）**：p-reduce 余 TS2571/TS2322 为 `Record<PropertyKey,unknown>` 上 `Symbol.iterator` 槽 unknown + 泛型 `Promise<any>` resolve 的深层限制，非臆测范围；is-arguments 的 TS2306/TS2307 为缺依赖与模块解析。
 
+### 第六轮（随机抽中 p-times / p-throttle / is-finite）
+
+| 库 | 版本 | strict 诊断（原始 → 转换后） |
+| --- | --- | --- |
+| p-times | 5.0.0 | 7 → 3（余为缺依赖 `p-map` 级联） |
+| p-throttle | 7.0.0 | 35 → 38（`this`/闭包 + 缺依赖深层动态性，固有限制） |
+| is-finite | 1.1.0 | 见报告（缺依赖族） |
+
+### 第七轮（随机抽中 is-date-object / is-regex / object-inspect）
+
+| 库 | 版本 | strict 诊断（原始 → 转换后 → 修复后） |
+| --- | --- | --- |
+| is-date-object | 1.1.0 | 2 → 2（缺依赖 `call-bound`） |
+| is-regex | 1.1.5 | 2 → 9 → **8**（内置工具类型别名冲突消除，余为缺依赖级联） |
+| object-inspect | 1.13.4 | 105 → 135（545 行大库，大量动态属性/序列化逻辑，固有限制累积） |
+
+**本轮修复：TS 内置工具类型被误生成 fallback 别名（is-regex）**
+
+`is-regex` 的 JSDoc `@type {(... receiver: ThisParameterType<...> ...)}` 中 `ThisParameterType` 是 TS 内置工具类型，但 `normalize.ts` 的 `BUILTIN_TYPE_NAMES` 名单漏了它，`convert.ts` 的 dangling-typedef 逻辑据此生成了 `type ThisParameterType = unknown;`——与 lib 声明冲突（TS2300）、且无泛型别名被当泛型用（TS2315）。
+
+修复：补全内置工具类型名单——`ThisParameterType`、`OmitThisParameter`、`ConstructorParameters`、`Uppercase`/`Lowercase`/`Capitalize`/`Uncapitalize`、`ReadonlyArray`、`This`、`NoInfer`。产物中 `type ThisParameterType = unknown;` 消失，TS2300/TS2315 消除，is-regex 9→8。`test/normalize.test.ts` 新增回归测试。**157/157 测试全绿**。
+
+**未修（固有限制）**：object-inspect 的 TS2339×41/TS2345×20 等为 545 行库对任意对象的反射式属性访问 + `typeof X === 'function' && X.prototype` 逻辑与未定型（回退 unknown）的累积，非单一可修点、不臆造；is-regex 余项均为缺依赖 `call-bound`/`hasown`/`gopd`。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。
