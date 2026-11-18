@@ -55,9 +55,16 @@ export function checkStrict(
     ts.sys.resolvePath(name) === resolved ? output : baseReadFile(name);
 
   const program = ts.createProgram({ rootNames: [resolved], options, host });
+  // Compare by SourceFile identity, not by file-name string. On Windows the
+  // compiler normalizes `fileName` to forward slashes while `ts.sys.resolvePath`
+  // yields backslashes (and case can differ), so a string comparison silently
+  // filters out every diagnostic and makes this gate always pass. The in-memory
+  // host serves exactly one source file, so identity is both precise and
+  // platform-independent.
+  const target = program.getSourceFile(resolved);
   const diagnostics = ts
     .getPreEmitDiagnostics(program)
-    .filter((diagnostic) => diagnostic.file === undefined || diagnostic.file.fileName === resolved);
+    .filter((diagnostic) => diagnostic.file === undefined || diagnostic.file === target);
 
   return {
     ok: diagnostics.length === 0,

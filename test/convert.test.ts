@@ -206,3 +206,18 @@ test('does not double-annotate a variable initialized by a function', () => {
   assert.doesNotMatch(output, /const handler: \(/);
   assert.match(output, /\(value: unknown\)/);
 });
+
+test('checkStrict still reports diagnostics when the file name is not normalized', () => {
+  // Regression: the old filter compared diagnostic.file.fileName to
+  // ts.sys.resolvePath(name) as strings. On Windows these differ (forward vs
+  // back slashes, case), so every diagnostic was filtered and the gate always
+  // passed. The fix compares by SourceFile identity. A name containing `..`
+  // exercises a path that TS normalizes, ensuring string equality is not
+  // assumed anywhere in the filter.
+  const bad = `const a: number = 'str';\n`;
+  for (const name of ['case.ts', './case.ts', 'dir/../case.ts']) {
+    const result = checkStrict(name, bad);
+    assert.equal(result.ok, false, `expected a strict failure for ${name}`);
+    assert.ok(result.diagnostics.some((d) => d.includes('TS2322')), `TS2322 lost for ${name}`);
+  }
+});
