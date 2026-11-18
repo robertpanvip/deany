@@ -316,6 +316,20 @@
 - **修复**：`typeText` 增加 `builtinCallResultFromReceiver` 兜底——当 call 的 checker 类型 opaque 且是 `X.method()` 形式时，仅当 receiver 的**推断表类型**已是具体内建 primitive（string/number/Date）、且方法在该族的 `UNIQUE_BUILTIN_METHODS` 中、`BUILTIN_METHOD_RETURN` 有确定返回（如 `split → string[]`）时，返回该 lib 签名结果。**不是按方法名臆测 receiver**：receiver 类型必须先被独立确证。
 - **效果**：with-reassign 与真实 normalize-path 模式的 `segs` 均为 `string[]`，segs 相关 TS18046×3 + TS2322 清零；完整样本诊断 5→1（余 1 条 `ch = path[2]` 的 `string|undefined`，属既有的字符串索引问题，原 JS 在 checkJs 下同型，不在本信号范围）。`test/realLib.test.ts` 新增回归测试 `builtin method return survives a reassigned receiver`，全套 **191/191 全绿**，typecheck/build 通过。
 
+### 定时循环续跑（基于 0.1.10，第 36 轮起）
+
+- 背景：第 21~35 轮的 40 轮计划因沙箱休眠中断，任务系统失联；本轮从 `round_36` 用最新代码（0.1.10，含 segs 修复）重启循环，`START_ROUND=36 ROUNDS=60 INTERVAL=600 N=3`，脚本按已落盘文件跳过，从第 37 轮续跑。循环交由任务系统管理，避免再次脱离。
+- **端到端验证 segs 修复**：normalize-path 名字已进过 TESTING_LOG，被探针"已测过滤"永久排除，随机轮次不会再抽到它。故用 `verify-latest.mjs` 直接对真实 `normalize-path/package/index.js` 转换：产物为 `var segs: string[] = path.split(...)`，segs 相关 TS18046×3 + TS2322 **全部清零**，诊断 **2→1**（余 1 条 `prefix` 的 `string|undefined`，属既有字符串索引问题，原 JS 在 checkJs 下同型）。segs 修复在最新代码上端到端确认生效。
+- **第 36 轮新信号：is-arrayish（1→4，TS2339×4 on `never`）**：产物 `obj: Array<unknown> | string | unknown[]` 过窄，TS 控制流在 `typeof obj === 'string'` 与 `instanceof Array`/`Array.isArray` 守卫负分支把 `obj` 收窄为 `never`，`obj.length/splice/constructor` 报 TS2339。实测不同注解：`unknown`→3、`object|string`→3、`Record<PropertyKey,unknown>|string`→2、`any`→0；原始 JS 在 checkJs 下本就是隐式 any（TS7006×1）。结论：这是**纯 duck-typing 库**（函数靠 `length/splice/constructor.name` 结构检测，无类型信息可推），任何安全注解都无法归零，与历轮"类型谓词/成员访问冲突不修"一致，归类为**固有限制，不修**（避免动核心守卫反推逻辑引入回归）。
+
+### 可靠类型信息来源扩展（三项优先级改进）
+
+基于"还能从哪里获取可靠类型信息"的梳理，实现三项实测驱动的改进（全套 **196/196 全绿**，typecheck/build 通过）：
+
+1. **控制流窄化取点（checker 已算好的收窄类型）**：实测确认即使 `checkJs: false`，checker 在守卫真分支的引用点也给出精确收窄类型（`x.length` 处 `x=string`、`x.getTime` 处 `x=Date`），而普通引用点（调用/初始化器/方法接收者）仍是 any——即 checker 自己就是"是否收窄"的天然判据。新增 `controlFlowNarrowedType`，在 `if` 真分支、三元真支、`&&` 右操作、`switch` case、自定义谓词守卫体内直接读该类型作为 source；严格过滤 any/unknown/never/`{}`/`object`/含 any 容器，确保具体调用点/迭代/内建证据仍优先。**新增能力**：`switch (typeof x) { case 'string': x.length }` 从错误的 `{ length: number }` 修为 `string`（语法反推只能匹配 `typeof x === 'literal'` 二元式，switch 完全看不到）；`instanceof`/谓词守卫体同样命中。普通未守卫使用点不受污染（保留属性形状保守推断）。
+2. **结构化槽位投影替换字符串投影**：`projectSlotType` 靠解析打印出的类型字符串投影，遇类型参数含逗号（函数类型）会失败并双重包装——`const m: Map<string, any> = new Map<string, (a: number, b: string) => void>()` 曾输出 `Map<string, Map<string, ...>>` + TS2322。新增 `structuredSlotType`，用 checker 对初始化器的 `getTypeArguments`/数组索引类型沿槽位路径结构化投影，优先于字符串投影；过滤改用 widened flags（避免函数返回 `void` 字样被文本正则误杀）。修复后输出 `Map<string, (a: number, b: string) => void>`，strict 1→0。tuple 括号场景（ `[any, any]` ）属数组字面量元素推断、非投影范畴，未触及。
+3. **内建返回的确定兜底**：实测确认 checker 对 `Object.keys/values/entries`、`Array.map`、`JSON` 等在可自然触发场景都直接给出正确返回类型，`BUILTIN_METHOD_RETURN` 与 `UNIQUE_BUILTIN_METHODS` 无缺口——补这些条目属死代码，按"不写无效代码"原则未加。找到并修复真实缺口：`join`/`toString` 返回 `string` 与元素类型无关，但当 checker 把链式调用（`mk().join(',')`，receiver opaque）判为 any 时拿不到。新增 `ARRAY_SCALAR_RETURN`，在 `builtinCallResultFromReceiver` 中当 receiver 的推断类型被独立确证为数组时返回确定类型（非按方法名臆测）。`const s: any = mk().join(',')` 由 any → `string`。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。

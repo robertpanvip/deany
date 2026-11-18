@@ -226,6 +226,61 @@ function projectSlotType(fullType: string, path: readonly number[]): string {
 }
 
 /**
+ * Project onto an `any` slot using the checker's structured type of the
+ * initializer rather than parsing a printed type string. String projection
+ * breaks when a type argument contains commas (e.g. a function type
+ * `(a: number, b: string) => void`) or other nested syntax; the checker's
+ * `getTypeArguments` / index type walk never does. Returns undefined unless
+ * every step is a concrete type object whose printed form is informative, so
+ * the caller can fall back to string projection and preserve existing behavior.
+ */
+function structuredSlotType(
+  node: ts.Node,
+  owner: ts.Node,
+  ctx: InferenceContext,
+): string | undefined {
+  if (
+    !ts.isVariableDeclaration(owner) &&
+    !ts.isPropertyDeclaration(owner)
+  ) {
+    return undefined;
+  }
+  const init = owner.initializer;
+  if (init === undefined) {
+    return undefined;
+  }
+  const path = slotPathOf(node);
+  if (path.length === 0) {
+    return undefined;
+  }
+  let current = ctx.checker.getTypeAtLocation(init);
+  for (const index of path) {
+    // Arrays/tuples: the numeric index type is the element type.
+    if (ctx.checker.isArrayType(current) || ctx.checker.isTupleType(current)) {
+      const element = ctx.checker.getIndexTypeOfType(current, ts.IndexKind.Number);
+      if (element === undefined) {
+        return undefined;
+      }
+      current = element;
+      continue;
+    }
+    const args = ctx.checker.getTypeArguments(current as ts.TypeReference);
+    const picked = args[index];
+    if (picked === undefined) {
+      return undefined;
+    }
+    current = picked;
+  }
+  const widened = ctx.checker.getWidenedType(current);
+  // Filter by flags, not text: a legitimate function-typed slot may print
+  // `void` as its return type (`(a: number) => void`) and must not be dropped.
+  if (widened.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) {
+    return undefined;
+  }
+  return widenedTypeText(ctx.checker, widened, node);
+}
+
+/**
  * `Record<K, any>` / `ReadonlyRecord<K, any>` keep their *values* in the `any`
  * slot. When the initializer is an object literal, the checker reports its
  * whole shape (`{ a: number; b: number; }`), which has no type arguments and
@@ -325,6 +380,85 @@ function widenedTypeText(checker: ts.TypeChecker, type: ts.Type, node: ts.Node):
 }
 
 /**
+ * Types the checker reports at a use site that carry no new information and
+ * must not be recorded as evidence (they would pollute a concrete source or a
+ * property-shape estimate). `any[]`/`Map<any, any>` are excluded because the
+ * element/slot evidence is collected separately and is more precise.
+ */
+function isOpaqueNarrowingType(text: string): boolean {
+  if (text.length === 0) {
+    return true;
+  }
+  if (/\b(any|unknown|never|void)\b/.test(text)) {
+    return true;
+  }
+  return text === '{}' || text === 'object' || text === 'PropertyKey';
+}
+
+/**
+ * True when `reference` sits in a branch the checker type-narrows by a guard.
+ * We only trust a checker-reported narrowed type inside such a region — at an
+ * ordinary use site the checker's type is the declaration's own `any`, which
+ * is information-free. Recognized guards: the true arm of `if (cond)`, the
+ * true arm of `cond ? a : b`, and the right operand of `cond && expr`. The
+ * guard itself must be a narrowing form (typeof / instanceof / Array.isArray /
+ * a custom type predicate / truthiness of the same binding) — but we rely on
+ * the checker to decide, so the broad structural test suffices here.
+ */
+function isInsideNarrowingTrueBranch(reference: ts.Identifier): boolean {
+  let current: ts.Node = reference;
+  let parent: ts.Node | undefined = current.parent;
+  while (parent !== undefined) {
+    if (ts.isIfStatement(parent) && parent.thenStatement === current) {
+      return true;
+    }
+    if (ts.isConditionalExpression(parent) && parent.whenTrue === current) {
+      return true;
+    }
+    if (
+      ts.isBinaryExpression(parent) &&
+      parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
+      parent.right === current
+    ) {
+      return true;
+    }
+    // `switch (typeof x) { case 'string': ... }`: the checker narrows x inside
+    // each case clause. Accept any case-clause body (the checker only reports a
+    // concrete type there when a guard actually narrowed the discriminant).
+    if (ts.isCaseClause(parent) && current.parent === parent) {
+      return true;
+    }
+    if (ts.isDefaultClause(parent) && current.parent === parent) {
+      return true;
+    }
+    current = parent;
+    parent = current.parent;
+  }
+  return false;
+}
+
+/**
+ * Control-flow narrowing via the checker: at a use site inside a guard's true
+ * branch the checker has already computed the narrowed type (e.g. `string` at
+ * `x.length` under `if (typeof x === 'string')`), even with `checkJs: false`.
+ * Reading it here covers guard forms the syntactic typeof/instanceof/isArray
+ * rules miss: truthiness checks, `switch`, negated guards and predicate guard
+ * bodies. Returns undefined for opaque or non-narrowing sites so concrete
+ * call-site / iteration / builtin evidence still wins.
+ */
+function controlFlowNarrowedType(
+  reference: ts.Identifier,
+  ctx: InferenceContext,
+): string | undefined {
+  if (!isInsideNarrowingTrueBranch(reference)) {
+    return undefined;
+  }
+  const type = ctx.checker.getTypeAtLocation(reference);
+  const text = widenedTypeText(ctx.checker, ctx.checker.getWidenedType(type), reference);
+  return isOpaqueNarrowingType(text) ? undefined : text;
+}
+
+/**
  * The fixed-point inference table. `declarations` holds the inferred type of a
  * value binding (variable / parameter / property); `returns` holds the inferred
  * return type of a function-like declaration. Nodes are used directly as keys
@@ -406,15 +540,15 @@ function builtinCallResultFromReceiver(ctx: InferenceContext, node: ts.Node): st
     return undefined;
   }
   const receiver = node.expression.expression;
-  // Only a statically known lib-unique method qualifies.
   const method = node.expression.name.text;
   const builtinReturn = BUILTIN_METHOD_RETURN.get(method);
-  if (builtinReturn === undefined) {
+  const arrayReturn = ARRAY_SCALAR_RETURN.get(method);
+  if (builtinReturn === undefined && arrayReturn === undefined) {
     return undefined;
   }
-  // The receiver must already be inferred as a concrete builtin primitive —
-  // never guess from the method name alone. resolveViaTable reads the table
-  // entry for an identifier/property-access receiver.
+  // The receiver must already be inferred as a concrete type — never guess
+  // from the method name alone. resolveViaTable reads the table entry for an
+  // identifier/property-access receiver.
   const receiverType = resolveViaTable(ctx, receiver);
   if (receiverType === undefined) {
     return undefined;
@@ -423,7 +557,18 @@ function builtinCallResultFromReceiver(ctx: InferenceContext, node: ts.Node): st
   const matchesFamily = UNIQUE_BUILTIN_METHODS.some(
     (family) => normalized === family.type && family.methods.has(method),
   );
-  return matchesFamily ? builtinReturn : undefined;
+  if (matchesFamily && builtinReturn !== undefined) {
+    return builtinReturn;
+  }
+  // Array methods whose return type is independent of the element type. When
+  // the checker types the call as `any` (opaque receiver) but the binding's
+  // inferred type is a concrete array, `join()`/`toString()` still return a
+  // definite `string`. The receiver must be independently confirmed as an
+  // array — never guess from the method name alone.
+  if (arrayReturn !== undefined && isArrayTypeString(normalized)) {
+    return arrayReturn;
+  }
+  return undefined;
 }
 
 /**
@@ -865,6 +1010,17 @@ const BUILTIN_METHOD_RETURN: ReadonlyMap<string, string> = new Map([
   ['setSeconds', 'number'],
   ['toISOString', 'string'], ['toUTCString', 'string'], ['toDateString', 'string'],
   ['toLocaleString', 'string'],
+]);
+
+/**
+ * Array methods whose return type does not depend on the element type, so a
+ * definite result can be recovered even when the checker types the call as
+ * `any` (e.g. a chained opaque receiver). Used only when the receiver's
+ * inferred type is independently confirmed as an array.
+ */
+const ARRAY_SCALAR_RETURN: ReadonlyMap<string, string> = new Map([
+  ['join', 'string'],
+  ['toString', 'string'],
 ]);
 
 /** Observed contextual return types that carry no information — ignore them. */
@@ -1387,6 +1543,13 @@ function constraintsFromReference(
   evidence: Evidence,
 ): void {
   const parent = reference.parent;
+
+  // Control-flow narrowing: inside a guard's true branch, ask the checker for
+  // the type it has already narrowed this binding to. This is direct evidence
+  // from the compiler's own flow analysis and covers guard shapes the syntactic
+  // typeof/instanceof/isArray rules cannot see (truthiness, switch, negated
+  // guards, custom predicates). Opaque / non-narrowing results are dropped.
+  addSource(evidence, controlFlowNarrowedType(reference, ctx));
 
   // `const { a, b } = x` / `const { a } = x`: the binding elements pulled out of
   // `x` are real evidence for `x`'s shape. Each element is inferred on its own
@@ -2665,8 +2828,15 @@ export function inferAnyInProject(
           // reported as its whole shape, which cannot be projected through the
           // value-slot path — derive the slot from the literal's values instead.
           const recordSlot = recordValueSlotType(node, owner, ctx);
+          // Prefer the checker's structured initializer type for projection:
+          // unlike parsing a printed type string it is immune to commas inside
+          // type arguments (function types, multi-arg generics). Fall back to
+          // the string projection when no structured type is available.
+          const structured = structuredSlotType(node, owner, ctx);
           const projected =
-            recordSlot ?? (wholeType === undefined ? undefined : projectSlotType(wholeType, slotPathOf(node)));
+            recordSlot ??
+            structured ??
+            (wholeType === undefined ? undefined : projectSlotType(wholeType, slotPathOf(node)));
           const usableProjected = projected !== 'never' ? projected : undefined;
           // For a mutable container slot, method calls that write into it
           // (`push`, `set`, `add`, index assignment) are covariant sources for

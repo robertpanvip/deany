@@ -236,6 +236,17 @@ test('projects a generic slot such as Map<string, any>', () => {
   assert.match(output, /const m: Map<string, number>/);
 });
 
+test('projects a slot whose type contains commas (function type) without double-wrapping', () => {
+  // String projection used to split the type arguments on the comma inside the
+  // function type and fail, falling back to the whole type (double wrap). The
+  // checker's structured type reads the slot directly.
+  const { output } = infer(
+    `const m: Map<string, any> = new Map<string, (a: number, b: string) => void>();\n`,
+  );
+  assert.match(output, /const m: Map<string, \(a: number, b: string\) => void>/);
+  assert.doesNotMatch(output, /Map<string, Map</);
+});
+
 test('unions element types written via push/unshift into an any[] slot', () => {
   const { output } = infer(`const a: any[] = [1]; a.push('x'); a.unshift(true);\n`);
   assert.match(output, /const a: \(boolean \| number \| string\)\[\]/);
@@ -812,4 +823,50 @@ test('does not invent a string type when both comparison operands are untyped', 
 function same(a: any, b: any): boolean { return a === b; }
 `);
   assert.match(output, /function same\(a: any, b: any\)/);
+});
+
+test('uses checker control-flow narrowing inside a switch(typeof) guard', () => {
+  // The syntactic typeof rule only matches `typeof x === 'literal'` binaries;
+  // a switch case is invisible to it. The checker has already narrowed x to
+  // string inside `case 'string'`, so read that type directly at the use site.
+  const { output } = infer(`
+function f(x: any) { switch (typeof x) { case 'string': x.length; break; } }
+`);
+  assert.match(output, /function f\(x: string\)/);
+  assert.doesNotMatch(output, /\{ length: number \}/);
+});
+
+test('uses checker control-flow narrowing inside instanceof and custom-predicate guards', () => {
+  const { output } = infer(`
+function isStr(v: any): v is string { return typeof v === 'string'; }
+function byInst(x: any) { if (x instanceof Date) { return x.getTime(); } return 0; }
+function byPredicate(x: any) { if (isStr(x)) { return x.toUpperCase(); } return ''; }
+`);
+  assert.match(output, /function byInst\(x: Date\)/);
+  assert.match(output, /function byPredicate\(x: string\)/);
+});
+
+test('control-flow narrowing does not pollute ordinary un-narrowed use sites', () => {
+  // At a plain call/property site the checker reports `any` for an `any`
+  // binding, so no narrowing evidence is recorded; those sites must still be
+  // inferred from their own call-site / property evidence, not from each other.
+  const { output } = infer(`
+function f(x: any) { x.toUpperCase(); return x.length; }
+`);
+  assert.doesNotMatch(output, /function f\(x: string\)/);
+  assert.match(output, /toUpperCase: \(/);
+});
+
+test('recovers a definite string from an opaque array join/toString call', () => {
+  // `join`/`toString` return `string` regardless of element type. When the
+  // checker types the call as `any` (chained opaque receiver), the receiver's
+  // independently-inferred array type confirms the method, so the return is
+  // known — never a method-name guess.
+  const { output } = infer(`
+function mk(): any { return [1, 2]; }
+const s: any = mk().join(',');
+const t: any = mk().toString();
+`);
+  assert.match(output, /const s: string = mk\(\)\.join/);
+  assert.match(output, /const t: string = mk\(\)\.toString/);
 });
