@@ -248,6 +248,7 @@
 - **1.2 内建容器 any**：`new Map()/Set()/WeakMap()/Promise()` 无显式类型参数时 checker 给 `Map<any,any>`，与 de-any 宗旨冲突；无 typeArguments 时把 any→unknown。显式类型参数与 `new Date()` 不受影响。
 - **1.10 Math.max 展开**：`Math.max(...xs)` 的形参 `...values:number[]` 是确定逆变约束；给 xs 加 `number[]` 约束（lib.d.ts 签名，非臆测）。
 - **1.11 lib 唯一方法反推**：`toUpperCase`→string、`toFixed`→number、`getTime`→Date 等——方法在 lib.d.ts 中只属一个 family。**弱证据 + 严格守卫**：仅当 binding 无任何 source 且所有观测属性都是同一 family 的唯一方法（且值为 method 签名）时收窄；有调用点具体类型或非唯一方法共存时不收窄，避免误伤自定义同名方法。
+  - **对象字面量自带同名方法（已验证）**：`const o: any = { toUpperCase(){…} }`（即使只有这一个方法）保留为 `{ toUpperCase(): string }` 形状，不收窄成 string——初始化器是强 source，优先于 weak 兜底；`{ toUpperCase(){…}, extra: 1 }` 作为实参传给只调 `toUpperCase` 的函数时，call-site 具体形状同样胜过 weak string。仅「裸 `any` 参数只观测到 `toUpperCase` 调用」才按设计收窄成 string。回归测试：`test/inferAny.test.ts` 的 `keeps an object literal with its own toUpperCase as a shape, not string`。
 
 ### 已知边界（未修，记录避免重复评估）
 

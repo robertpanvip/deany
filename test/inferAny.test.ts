@@ -607,6 +607,26 @@ function f(o: any) { o.toUpperCase(); o.customThing(); }
   assert.doesNotMatch(output, /o: string/);
 });
 
+test('keeps an object literal with its own toUpperCase as a shape, not string', () => {
+  const { output } = infer(`
+const only: any = { toUpperCase() { return 'x'; } };
+only.toUpperCase();
+const mixed: any = { toUpperCase() { return 'x'; }, extra: 1 };
+mixed.toUpperCase();
+function f(x: any) { return x.toUpperCase(); }
+const r = f({ toUpperCase() { return 'x'; }, extra: 1 });
+`);
+  // A real initializer is strong evidence and wins over the weak lib-unique
+  // fallback. Even a literal whose ONLY method is `toUpperCase` must keep its
+  // own object shape; a call-site literal likewise beats the weak narrowing.
+  assert.match(output, /const only: \{ toUpperCase\(\): string; \}/);
+  assert.match(output, /const mixed: \{ toUpperCase\(\): string; extra: number; \}/);
+  assert.match(output, /f\(x: \{ toUpperCase\(\): string; extra: number; \}\)/);
+  assert.doesNotMatch(output, /const only: string/);
+  assert.doesNotMatch(output, /const mixed: string/);
+  assert.doesNotMatch(output, /f\(x: string\)/);
+});
+
 test('instantiates generic classes inferred via instanceof with unknown', () => {
   const { output } = infer(`
 function isEmpty(x: any) {
