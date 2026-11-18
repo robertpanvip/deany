@@ -505,6 +505,81 @@ function renderPropertyShape(properties: ReadonlyMap<string, string>): string {
 }
 
 /**
+ * Merge property-write evidence into an object-literal shape source. A value
+ * built as `{ reject }` and later extended with `obj.run = ...` really has
+ * both members; the checker reports only the initializer's fields. Keep the
+ * initializer's own field types (the authoritative observed values) and append
+ * any property evidence not already present. Returns the source unchanged when
+ * it is not a plain object shape (e.g. a concrete class or a union member).
+ */
+function mergeObjectShapeWithProperties(
+  source: string,
+  properties: ReadonlyMap<string, string>,
+): string {
+  const trimmed = source.trim();
+  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
+    return source;
+  }
+  const body = trimmed.slice(1, -1).trim();
+  const existing = new Set<string>();
+  for (const field of splitTopLevelFields(body)) {
+    const colon = field.indexOf(':');
+    if (colon >= 0) {
+      const name = field.slice(0, colon).trim().replace(/^['"]|['"]$/g, '');
+      if (name.length > 0) {
+        existing.add(name);
+      }
+    }
+  }
+  const additions: string[] = [];
+  for (const [name, type] of properties) {
+    if (existing.has(name)) {
+      continue;
+    }
+    const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
+    // Fields written after construction are optional at the initializer site:
+    // `{ reject }` legitimately lacks `run` until `obj.run = ...` runs. Making
+    // them required would raise TS2741 on the initializer; optional keeps both
+    // the initializer and later accesses valid under strict mode.
+    additions.push(`${key}?: ${type};`);
+  }
+  if (additions.length === 0) {
+    return source;
+  }
+  // `body` already ends with `;` for checker-generated shapes; keep it so
+  // appended fields are separated. Trim a trailing space only.
+  const fields = body.length > 0 ? [`${body.trimEnd()}`, ...additions] : additions;
+  return `{ ${fields.join(' ')} }`;
+}
+
+/** Split an object-type body on top-level semicolons, honoring nested types. */
+function splitTopLevelFields(body: string): string[] {
+  const parts: string[] = [];
+  let generic = 0;
+  let paren = 0;
+  let brace = 0;
+  let bracket = 0;
+  let start = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i] ?? '';
+    if (ch === '<') generic += 1;
+    else if (ch === '>') generic -= 1;
+    else if (ch === '(') paren += 1;
+    else if (ch === ')') paren -= 1;
+    else if (ch === '{') brace += 1;
+    else if (ch === '}') brace -= 1;
+    else if (ch === '[') bracket += 1;
+    else if (ch === ']') bracket -= 1;
+    else if (ch === ';' && generic === 0 && paren === 0 && brace === 0 && bracket === 0) {
+      parts.push(body.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(body.slice(start).trim());
+  return parts.filter((part) => part.length > 0);
+}
+
+/**
  * Build a typed callback signature for a custom method called on a narrowed
  * array, e.g. `xs.custom(it => it.a.b)` becomes
  * `(callback: (arg: { a: { b: unknown; }; }) => void) => unknown`. The element
@@ -607,6 +682,8 @@ function propertyChainsOf(
  * - `arrayOwnMethods` are custom methods called on an array binding (detected
  *   via `Array.isArray` context); intersected into the array type so the calls
  *   type-check without inventing an element shape for unknown methods.
+ * - `objectLiteralInit` marks an object-literal initializer, whose shape source
+ *   may absorb properties written onto the binding after construction.
  */
 interface Evidence {
   readonly sources: string[];
@@ -614,6 +691,7 @@ interface Evidence {
   readonly properties: Map<string, string>;
   readonly elementShape: ShapeNode;
   readonly arrayOwnMethods: Map<string, string>;
+  objectLiteralInit: boolean;
 }
 
 function emptyEvidence(): Evidence {
@@ -623,6 +701,7 @@ function emptyEvidence(): Evidence {
     properties: new Map<string, string>(),
     elementShape: { children: new Map<string, ShapeNode>() },
     arrayOwnMethods: new Map<string, string>(),
+    objectLiteralInit: false,
   };
 }
 
@@ -959,10 +1038,22 @@ function constraintsFromReference(
     const grandparent = parent.parent;
     const isMethodCall =
       ts.isCallExpression(grandparent) && grandparent.expression === parent;
+    // `obj.field = expr`: the checker reports `any` for the read of a field
+    // not yet present on an evolving object literal, but the RHS carries the
+    // real type. Use it so the synthesized shape records the written value.
+    const isPropertyWrite =
+      ts.isBinaryExpression(grandparent) &&
+      grandparent.left === parent &&
+      grandparent.operatorToken.kind === ts.SyntaxKind.EqualsToken;
     const METHOD_TYPE = '(...args: unknown[]) => unknown';
     const previous = evidence.properties.get(parent.name.text);
     if (isMethodCall || previous === METHOD_TYPE) {
       evidence.properties.set(parent.name.text, METHOD_TYPE);
+    } else if (isPropertyWrite) {
+      evidence.properties.set(
+        parent.name.text,
+        typeText(ctx, (grandparent as ts.BinaryExpression).right) ?? 'unknown',
+      );
     } else {
       evidence.properties.set(parent.name.text, typeText(ctx, parent) ?? 'unknown');
     }
@@ -1127,9 +1218,15 @@ function constraintsFromReference(
       addSource(evidence, 'number');
     }
     // Relational comparisons only apply to orderable primitives (number or
-    // string); equality is excluded since any two types may be compared.
+    // string). This is a *constraint* — the operand must be assignable to
+    // `number | string` — not an observed value. Adding it as a covariant
+    // source would widen an operand that already has a concrete source (e.g.
+    // `let n = 0; n < limit` -> `number | string`), producing TS2365 at the
+    // comparison itself. As a constraint it intersects with concrete sources
+    // (number ∩ (number|string) = number) and still serves as a last-resort
+    // estimate when there is no other evidence.
     if (RELATIONAL_OPERATORS.has(parent.operatorToken.kind)) {
-      addSource(evidence, 'number | string');
+      addConstraint(evidence, 'number | string');
     }
     // `key in x` requires x to be an object (the left side is the key).
     if (
@@ -1337,10 +1434,26 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
     ts.isPropertySignature(owner) ||
     ts.isParameter(owner)
   ) {
-    // A default value (`function f(x = 5)`) is an observed value for the
-    // binding, just like a variable initializer.
+    // An empty array literal widens to `never[]`/`any[]`, which rejects every
+    // `push`. Real values written through `push`/`unshift`/index assignment are
+    // covariant evidence for the element type (the same structural evidence
+    // used for container mutation on the explicit-any path), so synthesize
+    // `Array<T>` from them instead of freezing the binding at `never[]`.
     if ('initializer' in owner && owner.initializer !== undefined) {
-      addSource(evidence, typeText(ctx, owner.initializer));
+      const init = owner.initializer;
+      if (ts.isArrayLiteralExpression(init) && init.elements.length === 0) {
+        const writes = collectMutationEvidence(owner, 'collection', ctx);
+        const element = mergeMutationEvidence(undefined, writes.filter((t) => t !== 'never'));
+        addSource(evidence, element === undefined ? typeText(ctx, init) : `Array<${element}>`);
+      } else {
+        if (
+          ts.isObjectLiteralExpression(init) &&
+          init.properties.every((p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p))
+        ) {
+          evidence.objectLiteralInit = true;
+        }
+        addSource(evidence, typeText(ctx, init));
+      }
     }
   }
 
@@ -1540,9 +1653,18 @@ function mergeEvidence(evidence: Evidence): {
     const shape = renderPropertyShape(evidence.properties);
     for (let i = 0; i < sources.length; i += 1) {
       const source = sources[i];
-      if (source !== undefined && MEMBERLESS_OBJECT_SOURCES.has(source)) {
+      if (source === undefined) {
+        continue;
+      }
+      if (MEMBERLESS_OBJECT_SOURCES.has(source)) {
         sources[i] = `${source} & ${shape}`;
         narrowedFromGuards = true;
+      } else if (evidence.objectLiteralInit) {
+        // An object literal later extended with `obj.field = v` / `obj.m()`
+        // really has those members. Absorb them into its own shape source;
+        // the helper no-ops on concrete classes and non-object sources, so
+        // call-site/具体类型 and `instanceof` results stay untouched.
+        sources[i] = mergeObjectShapeWithProperties(source, evidence.properties);
       }
     }
   }

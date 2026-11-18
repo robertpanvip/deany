@@ -441,3 +441,41 @@ function f(x) {
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
+
+test('empty array literal absorbs push element types (p-limit promises queue)', () => {
+  const { output } = convertJs(`
+function f() {
+  const promises = [];
+  promises.push(Promise.resolve(1));
+  return promises;
+}
+`);
+  assert.match(output, /const promises: Array<Promise<number>>/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('object literal absorbs fields written after construction as optional (p-limit queueItem)', () => {
+  const { output } = convertJs(`
+function f(reject) {
+  const queueItem = { reject };
+  queueItem.run = () => {};
+  return queueItem;
+}
+`);
+  assert.match(output, /queueItem: \{ reject: any; run\?: \(/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('relational comparison is a constraint, not a union source (p-limit activeCount)', () => {
+  const { output } = convertJs(`
+function f(limit) {
+  let activeCount = 0;
+  if (activeCount < limit && activeCount > 0) { activeCount++; }
+  return activeCount;
+}
+`);
+  assert.match(output, /let activeCount: number = 0/);
+  assert.doesNotMatch(output, /let activeCount: number \| string/);
+});

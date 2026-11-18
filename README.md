@@ -339,6 +339,11 @@ npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
 - 幂运算 `x ** 2` → `number`（补齐算术白名单）；`const n: number = x` 的**显式**注解 → 逆变约束 `number`（无注解或 `any`/`unknown` 不算，与具体来源冲突时来源胜出）；`[...x]` / `f(...x)` → `unknown[]`（对象展开 `{...x}` 不推）；短路赋值 `x ||= 5` / `x ??= 'fb'` → `number` / `string`。
 - `Array.isArray(x)` 配合 `x.map/forEach(it => it.a.b)` 等已知迭代调用，从回调首参的**属性访问链**递归合成元素形状，把 `unknown[]` 精化为 `Array<{ a: { b: unknown } }>`（多条链合并、只含实际访问的属性；具体来源优先；`reduce` 等首参为累加器的方法排除）。JS 隐式 any 模式下，这类元素参数不再被多加 `item: unknown` 注解而覆盖上下文类型。
 
+第五轮深挖 p-limit 的 `index.js`（此前只在第二轮粗略转换过），修复 JS 隐式 any 路径缺失的三类真实结构证据：
+- 空数组字面量 `const a = []` 的 `push`/索引写入实参类型被收集为元素类型，`never[]` → `Array<T>`（消除 `TS2345`；如 p-limit 的 `promises` 队列）。此前 push 证据只在 TS 显式 any 路径收集，JS 路径没有。
+- 对象字面量在构造后被追加的字段（`obj.run = fn` / `obj.m()`）以**可选字段**合入其形状，`{ reject }` → `{ reject: ...; run?: ... }`——构造时确实还没有该字段，设为可选才能同时通过初始化器与后续访问（消除 `TS2339`，且不制造 `TS2741`/`TS2722`；如 p-limit 的 `queueItem.run`）。具体类 / `instanceof` / call-site 来源不受影响。
+- 关系比较 `< > <= >=` 从"协变来源 `number | string`"改为"逆变约束"：已有具体来源的操作数不再被 widen 成联合（`let n = 0; n < limit` → `n: number`，消除比较处的 `TS2365`），无来源时仍作兜底估计。
+
 仍存在的局限（属于"JS 动态模式 → strict TS"的固有难度，非语法 bug）：
 
 - `unknown` 参与运算/索引/赋值会触发 `TS18046/TS2345/TS2322`；函数内 `this` 触发 `TS2683`。这些需按具体业务补类型或用 `infer-any` 进一步收窄。例如 p-limit 里 `require('yocto-queue')` 的结果、`typeof` 收窄存进变量（`var type = typeof val`）后无法跨变量收窄，都会留下 `unknown`。
