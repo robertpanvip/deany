@@ -45,8 +45,45 @@
 - 关系比较中 `number < (number | string)` 的 `TS2365`（`limit` 只用于比较，无法判定 number/string，保守不臆测）。
 - `promise`/generator 返回类型被推成 `Array<any>` 的连锁（表达式体箭头 + 嵌套 Promise 推断，属独立返回类型推断问题）。
 
+## 第六轮详情（10 个 npm 小库批量压测）
+
+一次性拉取 10 个未测过的可靠小库（npm registry），对每个库主入口 JS 跑 deany 转换 + `checkStrict`。来源与版本：
+
+| 库 | 版本 | 入口 | strict 诊断（原始 JS → 转换后） |
+| --- | --- | --- | --- |
+| inherits | 2.0.4 | inherits.js | 0 → **0**（本轮修复前为 1，TS2502） |
+| bytes | 3.1.2 | index.js | 10 → 11 |
+| is-observable | 3.0.0 | index.js | 4 → 4 |
+| once | 1.4.0 | once.js | 17 → 18（修复前 19） |
+| p-defer | 4.0.1 | index.js | 3 → 1 |
+| p-filter | 4.1.0 | index.js | 13 → 5 |
+| p-map | 7.1.1 | index.js | 57 → 34（修复前 36） |
+| p-timeout | 8.1.0 | index.js | 17 → 16 |
+| wrappy | 1.0.2 | wrappy.js | 6 → 6 |
+| yallist | 5.0.0 | dist/esm/index.js | 34 → 83 |
+| **合计** | | | **161 → 178**（修复前 182；`inherits`/`p-map`/`once` 三库净降 5） |
+
+### 本轮修复：CommonJS `require()` 自引用类型（真实工具缺陷）
+
+**现象**：`var util = require('util')` 被注解成 `var util: typeof util`（TS2502 循环自引用）；`require('path')` → `path.PlatformPath`（TS2503）、`require('fs')` → `typeof fs`。所有 CommonJS 库的中招。
+
+**根因**：`collectEvidence` 收集 initializer 时用 `checker.typeToString` 打印类型，TypeChecker 会用**本地绑定名**打印模块命名空间类型（`typeof util`），写成注解即自引用。
+
+**修复**：新增 `requireModuleType()`，识别 `require('mod')` 调用并重述为不含绑定名的 `typeof import("mod")`；同时加 `isSelfReferentialType()` 兜底拦截其它自引用文本。推理依据：checker 能打印出自引用模块类型 ⟺ 模块类型可解析 ⟹ `typeof import("mod")` 同样可解析，不会退化成 `unknown`。三条最小复现（util/path/fs）strict 诊断全部清零。`test/realLib.test.ts` 新增 3 个回归测试（覆盖 infer-any 与 JS 两条路径）。
+
+**效果**：`inherits` 1→0、`p-map` 36→34、`once` 19→18；总体 182→178。`typeof import("util")` 等类型精确且 strict-clean，不再臆造 `any`/`unknown`。
+
+### 剩余诊断分类（未修，多为固有限制）
+
+- **JSDoc 点号参数**：`bytes` 用 `@param {string} [options.thousandsSeparator]` 明确声明子字段，但工具只推 `options: object`，丢字段（TS2339×6）。属可靠证据遗漏，但需改 JSDoc→对象形状合成，面较大，留待专门一轮。
+- **函数对象后追加字段**：`once` 的 `f.called = false; f.value = ...`（TS2339×4）。类似已修的"对象字面量后追加字段"，但函数表达式绑定被 convert 刻意跳过注解（避免重复），修复需动该逻辑，风险较高。
+- **泛型/外部类型**：`p-map`/`yallist`/`p-timeout` 的 TS2345/TS2322/TS2526 多为 `unknown` 传入泛型槽位、外部类型、`get/set` 访问器配对等，属 JS 动态性固有限制。
+- **非标准 API**：`is-observable` 的 `Symbol.observable`（TS2339/TS2571）非标准 Symbol，lib.d.ts 无声明，工具不应臆造。
+- **缺依赖**：`p-filter`/`p-map` 的 TS2307 为外部包未安装（对照环境未装 node_modules）。
+- **`this` 隐式类型**：`wrappy` 的 TS2683、`p-timeout` 的 TS4114（override）。
+
 ## 待选库（尚未测试，供下一轮参考）
 
-小型、开源、可靠的候选：`sindresorhus/p-map`、`sindresorhus/p-filter`、`visionmedia/bytes`（src 目录）、`jshttp/ms`、`isaacs/yallist`、`feross/once`、`raynos/wrappy`、`component/inherits`、`sindresorhus/is-observable`、`sindresorhus/p-defer`。
+预留候选：`visionmedia/bytes` src 源码目录（区别于已测的 npm 发布版）、`jshttp/ms`、`sindresorhus/p-locate`、`sindresorhus/p-finally`、`sindresorhus/p-any`、`component/emitter`、`feross/standard` 依赖链小库。
 
-> 拉取失败或网络不可用时如实记录并跳过，不要伪造结果。每轮只处理一个库，聚焦做扎实。
+> 拉取失败或网络不可用时如实记录并跳过，不要伪造结果。每轮聚焦一个真实缺陷做扎实，不追求诊断数清零——`unknown`/`void` 是保守设计的正确兜底。

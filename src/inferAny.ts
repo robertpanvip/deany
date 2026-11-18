@@ -733,6 +733,47 @@ function isArrayIsArrayCall(call: ts.CallExpression): boolean {
 }
 
 /**
+ * TypeChecker prints a CommonJS `require('x')` initializer's module namespace
+ * type using the *local binding name*, e.g. `var util = require('util')` prints
+ * as `typeof util`, `var path = require('path')` as `path.PlatformPath`, and
+ * `var fs = require('fs')` as `typeof fs`. Emitting that as an annotation makes
+ * the binding reference itself, which TypeScript rejects (TS2502 / TS2503).
+ * Detect such self-referential text so the initializer is not used as a type
+ * source; the module's real shape is still learned from member accesses.
+ */
+function isSelfReferentialType(text: string, bindingName: string): boolean {
+  return (
+    text === `typeof ${bindingName}` ||
+    text.startsWith(`typeof ${bindingName}.`) ||
+    text.startsWith(`${bindingName}.`)
+  );
+}
+
+/**
+ * Re-express a CommonJS `require('mod')` call as a self-reference-free module
+ * type query (`typeof import("mod")`). TypeChecker prints these initializer
+ * types using the local binding name (`typeof util`, `path.PlatformPath`),
+ * which is only resolvable because the module type exists — so an equivalent
+ * `typeof import("mod")` is equally resolvable but never self-references.
+ * Bare-specifier modules only: relative paths are left to other evidence.
+ */
+function requireModuleType(node: ts.Node): string | undefined {
+  if (
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === 'require' &&
+    node.arguments.length > 0 &&
+    ts.isStringLiteralLike(node.arguments[0]!)
+  ) {
+    const spec = (node.arguments[0] as ts.StringLiteralLike).text;
+    if (spec.length > 0 && !spec.startsWith('.') && !spec.startsWith('/')) {
+      return `typeof import(${JSON.stringify(spec)})`;
+    }
+  }
+  return undefined;
+}
+
+/**
  * True if `node` sits inside a branch guarded by `Array.isArray(<same>)` —
  * e.g. `if (Array.isArray(xs)) { xs.custom(...) }`. Walking up to the nearest
  * conditional and testing its expression for an isArray call on the same
@@ -1485,7 +1526,18 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
         ) {
           evidence.objectLiteralInit = true;
         }
-        addSource(evidence, typeText(ctx, init));
+        // A CommonJS `require('mod')` initializer prints as a self-referential
+        // type (`typeof util`, `path.PlatformPath`, `typeof fs`) that TypeScript
+        // rejects (TS2502/TS2503). Re-express it as `typeof import("mod")`,
+        // which keeps the real module type without naming the local binding.
+        const initializerType = requireModuleType(init) ?? typeText(ctx, init);
+        const bindingName = ts.isIdentifier(owner.name) ? owner.name.text : undefined;
+        if (
+          initializerType !== undefined &&
+          !(bindingName !== undefined && isSelfReferentialType(initializerType, bindingName))
+        ) {
+          addSource(evidence, initializerType);
+        }
       }
     }
   }

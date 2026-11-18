@@ -479,3 +479,43 @@ function f(limit) {
   assert.match(output, /let activeCount: number = 0/);
   assert.doesNotMatch(output, /let activeCount: number \| string/);
 });
+
+// --- CommonJS require: self-referential module type (inherits / once / wrappy) ---
+
+test('require() initializer uses a non-self-referential module type query (inherits)', () => {
+  const output = inferTs(`
+declare var module: any;
+var util: any = require('util');
+if (typeof util.inherits !== 'function') throw '';
+module.exports = util.inherits;
+`);
+  assert.match(output, /var util: typeof import\("util"\)/);
+  assert.doesNotMatch(output, /var util: typeof util\b/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('require() with member access stays strict-clean and does not degrade to unknown (fs)', () => {
+  const output = inferTs(`
+var fs: any = require('fs');
+fs.writeFileSync('a', 'b');
+`);
+  assert.match(output, /var fs: typeof import\("fs"\)/);
+  assert.doesNotMatch(output, /var fs: unknown/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('JS implicit-any require() initializer also emits a module type query', () => {
+  const { output } = convertJs(`
+try {
+  var util = require('util');
+  if (typeof util.inherits !== 'function') throw '';
+  module.exports = util.inherits;
+} catch (e) {
+  module.exports = {};
+}
+`);
+  assert.match(output, /var util: typeof import\("util"\)/);
+  assert.doesNotMatch(output, /var util: typeof util\b/);
+});
