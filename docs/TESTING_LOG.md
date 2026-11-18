@@ -82,8 +82,28 @@
 - **缺依赖**：`p-filter`/`p-map` 的 TS2307 为外部包未安装（对照环境未装 node_modules）。
 - **`this` 隐式类型**：`wrappy` 的 TS2683、`p-timeout` 的 TS4114（override）。
 
+## 第七轮详情（会话内定时压测 · 随机抽库）
+
+工作模式：会话内后台脚本每 10 分钟随机抽 3 个未测库（候选池 42 个）→ 下载 → 转换 → strict 检查 → 落盘报告；主会话逐轮读取报告做智能分析修复。共 20 轮。
+
+### 第一轮（随机抽中 p-any / p-map-series / p-each-series）
+
+| 库 | 版本 | strict 诊断（原始 → 转换后 → 修复后） |
+| --- | --- | --- |
+| p-any | 5.0.0 | 6 → 7 → 7（余下均为缺依赖级联，固有限制） |
+| p-map-series | 2.0.0 | 2 → 1 → **0** |
+| p-each-series | 3.0.0 | 2 → **0** |
+
+**本轮修复：空数组 push 不透明值冻结成 `Array<never>`**
+
+`p-map-series` 的 `const result = []; result.push(await mapper(...))` 被推成 `Array<never>`，所有 push 报 TS2345。根因：`collectMutationEvidence.add()` 在 `typeText()` 对 push 实参（call/await 表达式，checker 类型为 `any`）返回 `undefined` 时**没有收集任何证据**，导致 `writes=[]`，空数组回退到 checker 默认的 `Array<never>`。
+
+修复：`add()` 对无法命名类型的已写入值收集 `'unknown'`——它仍是真实写入，元素槽必须能容纳该值；`Array<unknown>` 接受任意 push 且 strict-clean，不臆造具体类型。同时空数组分支增加防御：writes 非空但合并结果为空时显式用 `Array<unknown>`。三条最小复现（`push(fn(x))` / `push(await fn(x))` / `push(await v)`）全部清零。`test/realLib.test.ts` 新增回归测试。现有 `push(Promise.resolve(1)) → Array<Promise<number>>` 行为不变（153/153 测试全绿）。
+
+**p-any 剩余 7 条（未修，固有限制）**：3×TS2307 缺 `p-some`/`p-cancelable` 依赖；TS2698/TS18046/TS2339/TS2488 源于 `PCancelable.fn(async onCancel => ...)` 回调参数——外部库 API + 依赖缺失，无法可靠推断，留 `unknown` 是保守正确。
+
 ## 待选库（尚未测试，供下一轮参考）
 
-预留候选：`visionmedia/bytes` src 源码目录（区别于已测的 npm 发布版）、`jshttp/ms`、`sindresorhus/p-locate`、`sindresorhus/p-finally`、`sindresorhus/p-any`、`component/emitter`、`feross/standard` 依赖链小库。
+预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-locate`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。
 
 > 拉取失败或网络不可用时如实记录并跳过，不要伪造结果。每轮聚焦一个真实缺陷做扎实，不追求诊断数清零——`unknown`/`void` 是保守设计的正确兜底。

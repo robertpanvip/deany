@@ -1457,9 +1457,19 @@ function collectMutationEvidence(
   }
   const collected: string[] = [];
   const add = (node: ts.Expression | undefined): void => {
-    const text = node === undefined ? undefined : typeText(ctx, node);
+    if (node === undefined) {
+      return;
+    }
+    const text = typeText(ctx, node);
     if (text !== undefined) {
       collected.push(text);
+    } else {
+      // The written value is an opaque `any`/`unknown` (e.g. `r.push(fn(x))`
+      // where `fn` is an implicit-any callback, or `r.push(await v)`). It is
+      // still a real write: the element slot can hold that value, so record
+      // `unknown`. This keeps `[]` from freezing at `Array<never>` (which
+      // rejects every push with TS2345) without inventing a concrete type.
+      collected.push('unknown');
     }
   };
   for (const ref of referencesOf(symbol, ctx)) {
@@ -1518,7 +1528,19 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
       if (ts.isArrayLiteralExpression(init) && init.elements.length === 0) {
         const writes = collectMutationEvidence(owner, 'collection', ctx);
         const element = mergeMutationEvidence(undefined, writes.filter((t) => t !== 'never'));
-        addSource(evidence, element === undefined ? typeText(ctx, init) : `Array<${element}>`);
+        if (element !== undefined) {
+          addSource(evidence, `Array<${element}>`);
+        } else if (writes.length > 0) {
+          // Values were pushed, but every pushed value was an opaque `any`
+          // (e.g. `r.push(mapper(1))` / `r.push(await v)` where `typeText`
+          // could not name a concrete type). `Array<never>` — the checker's
+          // default for `[]` — would reject every one of those pushes with
+          // TS2345. Use `Array<unknown>`: it accepts any pushed value and is
+          // the strict-safe "type not known" fallback, never an invented type.
+          addSource(evidence, 'Array<unknown>');
+        } else {
+          addSource(evidence, typeText(ctx, init));
+        }
       } else {
         if (
           ts.isObjectLiteralExpression(init) &&

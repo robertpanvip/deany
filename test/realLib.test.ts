@@ -455,6 +455,23 @@ function f() {
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
 
+test('empty array pushed with opaque any/await values becomes Array<unknown> not Array<never> (p-map-series)', () => {
+  const { output, diagnostics } = convertJs(`
+async function f(mapper, iterable) {
+  const result = [];
+  for (const value of iterable) {
+    result.push(await mapper(await value, 0));
+  }
+  return result;
+}
+`);
+  assert.match(output, /const result: Array<unknown>/);
+  assert.doesNotMatch(output, /Array<never>/);
+  assert.ok(!diagnostics.some((d) => d.includes('TS2345')), diagnostics.join('\n'));
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
 test('object literal absorbs fields written after construction as optional (p-limit queueItem)', () => {
   const { output } = convertJs(`
 function f(reject) {
