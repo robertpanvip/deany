@@ -575,3 +575,36 @@ export function outer(init, reducer) {
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
+
+test('dotted @param tags compose an object shape instead of a bare object (bytes)', () => {
+  const { output } = convertJs(`
+/**
+ * @param {object} [options]
+ * @param {number} [options.decimalPlaces=2]
+ * @param {string} [options.thousandsSeparator=]
+ */
+export function format(options) {
+  var thousandsSeparator = (options && options.thousandsSeparator) || '';
+  var decimalPlaces = (options && options.decimalPlaces !== undefined) ? options.decimalPlaces : 2;
+  return thousandsSeparator + decimalPlaces;
+}
+`);
+  assert.match(output, /options\?: \{ decimalPlaces\?: number; thousandsSeparator\?: string; \}/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('required dotted @param tags produce required object fields', () => {
+  const { output } = convertJs(`
+/**
+ * @param {object} options
+ * @param {string} options.name
+ */
+export function greet(options) {
+  return 'hi ' + options.name;
+}
+`);
+  assert.match(output, /options: \{ name: string; \}/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});

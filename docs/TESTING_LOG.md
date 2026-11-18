@@ -174,6 +174,22 @@
 
 **未修（固有限制）**：object-inspect 的 TS2339×41/TS2345×20 等为 545 行库对任意对象的反射式属性访问 + `typeof X === 'function' && X.prototype` 逻辑与未定型（回退 unknown）的累积，非单一可修点、不臆造；is-regex 余项均为缺依赖 `call-bound`/`hasown`/`gopd`。
 
+## 第八轮详情（复审历轮「未修项」是否可修）
+
+逐个复审前几轮标注为「未修复」的项，区分「真实可修缺陷」与「多因素叠加/缺依赖级联，不宜单点修」。共处理三项，只修 1 项：
+
+### 已修：JSDoc 点号参数丢子字段（bytes，第六轮遗留）
+- **复现**：`@param {object} [options]` + `@param {string} [options.thousandsSeparator]` → `options: object`，子字段全丢（TS2339×6）。
+- **根因**：`jsdoc.ts` 把 `options.thousandsSeparator` 解析为独立 tag，`convert.ts` 参数循环只按完整名匹配 `@param`，点号 tag 匹配不到 `options`，checker 又把整体压成裸 `object`。
+- **修复**：`normalize.ts` 新增 `objectTypeFromDottedParams(root, tags, options)`，把 `options.a` / `[options.b]` 折叠成嵌套 inline 对象（可选字段保留 `?`）；`convert.ts` 参数循环在按名匹配前先收集 `name.` 前缀的点号 tag，命中则合成对象形状并标记 tag 已用（消除误报警告）。必填/可选、多层嵌套、非法标识符均覆盖。
+- **效果**：bytes 真实写法 6×TS2339 清零；产物 `options?: { decimalPlaces?: number; thousandsSeparator?: string; }`。`test/realLib.test.ts` 新增 2 条回归测试。**159/159 测试全绿**。
+
+### 复审后不修（如实记录原因）
+
+- **函数对象后追加字段（once，第六轮）**：`var f = function(){}` + `f.called/f.value` 的函数内引用报 11×TS2339。受控实验：给 `var f` 加交叉注解（`{(...args):any; called; value}`）虽把 18→13，但函数表达式初始化点立刻产生 TS2739（缺属性），且 `fn` 的 `this`/`arguments`/缺依赖 `wrappy` 是独立问题——多因素叠加，非单一可修点。强行改 `processVariable` 跳过函数绑定的既有逻辑风险高，维持原状。
+- **define-properties 的 `name: unknown`（第九轮）**：`name in obj` / `obj[name]` 的 key 被推 `unknown`（TS18046/TS2538）。实验：仅把 key 改 `PropertyKey` 只是把 TS2538 换成 TS7053（容器 `object` 无索引签名），净收益为零；连同容器改 `Record` 又引入调用点 TS2345。根因是缺依赖 `object-keys` 令 `map`/`props` 类型丢失的级联，非 key 约束单点可解，维持原状。
+- 其余历轮未修项（缺依赖 TS2307、正则 flag TS1501、class override TS4114、外部泛型/Symbol 槽、object-inspect 反射式动态属性）均为检查门槛或保守兜底正确，不在臆测范围内。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。

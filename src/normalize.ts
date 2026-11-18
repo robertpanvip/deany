@@ -247,6 +247,62 @@ export function objectTypeFromProperties(
   return `{ ${members.join(' ')} }`;
 }
 
+/**
+ * Build a nested inline object type from `@param options.foo` / `@param [options.bar]`
+ * style tags. These describe properties of a single parameter; the checker normally
+ * collapses them to a bare `object`, losing every field (TS2339). Folding the dotted
+ * paths back into an object shape keeps the JSDoc's explicit, reliable evidence.
+ */
+export function objectTypeFromDottedParams(
+  root: string,
+  tags: readonly JsDocTag[],
+  options: ConvertOptions,
+): string {
+  interface ShapeNode {
+    optional: boolean;
+    type: string | undefined;
+    readonly children: Map<string, ShapeNode>;
+  }
+  const makeNode = (): ShapeNode => ({ optional: false, type: undefined, children: new Map() });
+  const rootNode = makeNode();
+  const prefix = `${root}.`;
+
+  for (const tag of tags) {
+    const name = tag.name;
+    if (name === undefined || !name.startsWith(prefix)) {
+      continue;
+    }
+    const path = name.slice(prefix.length).split('.').filter((segment) => segment.length > 0);
+    if (path.length === 0) {
+      continue;
+    }
+    let node = rootNode;
+    for (const segment of path) {
+      let next = node.children.get(segment);
+      if (next === undefined) {
+        next = makeNode();
+        node.children.set(segment, next);
+      }
+      node = next;
+    }
+    node.optional = tag.optional;
+    node.type = tag.typeText ?? options.defaultType;
+  }
+
+  const render = (node: ShapeNode): string => {
+    if (node.children.size === 0) {
+      return normalizeJsDocType(node.type ?? options.defaultType, options);
+    }
+    const members = [...node.children.entries()].map(([key, child]) => {
+      const quoted = /^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key);
+      return `${quoted}${child.optional ? '?' : ''}: ${render(child)};`;
+    });
+    return `{ ${members.join(' ')} }`;
+  };
+
+  return render(rootNode);
+}
+
 /** Wrap a JSDoc `@returns` type for an async function. */
 export function wrapAsyncReturn(type: string, options: ConvertOptions): string {
   if (!options.asyncPromiseReturn || type.startsWith('Promise<')) {

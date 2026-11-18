@@ -13,6 +13,7 @@ import {
   extractCustomTypeNames,
   normalizeJsDocType,
   normalizeRestType,
+  objectTypeFromDottedParams,
   objectTypeFromProperties,
   wrapAsyncReturn,
 } from './normalize.js';
@@ -415,7 +416,30 @@ export function convertSource(
         }
 
         let annotation: string | undefined;
-        if (tag?.typeText !== undefined) {
+        // `@param {string} [options.foo]` describes a field of `options`, not a
+        // separate parameter. The checker collapses these to a bare `object` and
+        // drops the fields, so fold every dotted tag back into an inline shape.
+        const dottedTags =
+          name === undefined
+            ? []
+            : paramTags.filter(
+                (item) =>
+                  !usedTags.has(item) &&
+                  item.name !== undefined &&
+                  item.name.startsWith(`${name}.`),
+              );
+        if (dottedTags.length > 0) {
+          for (const dotted of dottedTags) {
+            usedTags.add(dotted);
+          }
+          const shape = objectTypeFromDottedParams(name ?? '', dottedTags, options);
+          const optional =
+            tag !== undefined &&
+            tag.optional &&
+            parameter.initializer === undefined &&
+            parameter.dotDotDotToken === undefined;
+          annotation = `${optional ? '?' : ''}: ${shape}`;
+        } else if (tag?.typeText !== undefined) {
           const type = parameter.dotDotDotToken || tag.variadic
             ? normalizeRestType(tag.typeText, options)
             : normalizeJsDocType(tag.typeText, options);
