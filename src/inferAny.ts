@@ -692,6 +692,8 @@ interface Evidence {
   readonly elementShape: ShapeNode;
   readonly arrayOwnMethods: Map<string, string>;
   objectLiteralInit: boolean;
+  /** True when the binding was seen only in string-like contexts. Weak hint. */
+  stringContext: boolean;
 }
 
 function emptyEvidence(): Evidence {
@@ -702,6 +704,7 @@ function emptyEvidence(): Evidence {
     elementShape: { children: new Map<string, ShapeNode>() },
     arrayOwnMethods: new Map<string, string>(),
     objectLiteralInit: false,
+    stringContext: false,
   };
 }
 
@@ -1250,6 +1253,36 @@ function constraintsFromReference(
     }
   }
 
+  // String-like contexts: `${x}`, `'a' + x` / `x + 'a'`, and `x === 'literal'`
+  // (also `!==`). They prove the value can be used as a string, but do not
+  // prove it is a string — interpolation and `+` accept numbers too. So this is
+  // recorded as a weak hint, consumed only as a last resort in mergeEvidence:
+  // real sources (`x = 1`, `x + 1`, call-site arguments) always win and are
+  // never widened into `string | number`.
+  if (ts.isTemplateSpan(parent) && parent.expression === reference) {
+    evidence.stringContext = true;
+  }
+  if (
+    ts.isBinaryExpression(parent) &&
+    (parent.left === reference || parent.right === reference)
+  ) {
+    const operator = parent.operatorToken.kind;
+    const other = parent.left === reference ? parent.right : parent.left;
+    const stringOperand =
+      ts.isStringLiteral(other) ||
+      ts.isNoSubstitutionTemplateLiteral(other) ||
+      ts.isTemplateExpression(other) ||
+      typeText(ctx, other) === 'string';
+    if (
+      stringOperand &&
+      (operator === ts.SyntaxKind.PlusToken ||
+        operator === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+        operator === ts.SyntaxKind.ExclamationEqualsEqualsToken)
+    ) {
+      evidence.stringContext = true;
+    }
+  }
+
   if (ts.isTypeOfExpression(parent)) {
     // `typeof x === 'string'` is a useful hint but not authoritative. Some
     // `typeof` result strings are not legal TypeScript type names (`function`
@@ -1699,6 +1732,14 @@ function mergeEvidence(evidence: Evidence): {
   } else if (evidence.properties.size > 0) {
     // Last resort: synthesize an object shape from accessed properties.
     members = [renderPropertyShape(evidence.properties)];
+    weak = true;
+  } else if (evidence.stringContext) {
+    // Last resort: a binding observed only in string-like contexts (template
+    // interpolation, `+` with a string, `===` a string literal) is string-like.
+    // Weak so a later fixed-point round with a concrete source still refines it:
+    // interpolation and `+` also accept numbers, so this must never override
+    // real evidence such as `x = 1` or `x + 1`.
+    members = ['string'];
     weak = true;
   } else {
     return { reason: 'no usage evidence' };

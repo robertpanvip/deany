@@ -670,3 +670,30 @@ takeString(x);
 `);
   assert.match(output, /let x: any;/);
 });
+
+test('infers string from template interpolation, concatenation and strict comparison', () => {
+  const { output } = infer(`
+function interpolated(id: any): string { return \`id is \${id}\`; }
+function concatenated(a: any): string { return 'x' + a; }
+function compared(id: any): boolean { return id === 'x'; }
+`);
+  assert.match(output, /function interpolated\(id: string\)/);
+  assert.match(output, /function concatenated\(a: string\)/);
+  assert.match(output, /function compared\(id: string\)/);
+});
+
+test('string contexts are a weak hint and never override real numeric evidence', () => {
+  const { output } = infer(`
+function numeric(a: any): string { return a + 1; }
+function assigned(a: any): string { a = 1; return \`\${a}\`; }
+`);
+  assert.match(output, /function numeric\(a: number\)/);
+  assert.match(output, /function assigned\(a: number\)/);
+});
+
+test('does not invent a string type when both comparison operands are untyped', () => {
+  const { output } = infer(`
+function same(a: any, b: any): boolean { return a === b; }
+`);
+  assert.match(output, /function same\(a: any, b: any\)/);
+});
