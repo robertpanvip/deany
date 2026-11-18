@@ -437,6 +437,42 @@ function handle(x: any) {
   assert.doesNotMatch(output, /Box & \{/);
 });
 
+test('infers an any parameter from a custom type-predicate guard', () => {
+  const { output } = infer(`
+class Foo { a = 1; }
+function isFoo(x: unknown): x is Foo { return true; }
+function handle(x: any) {
+  if (isFoo(x)) { return x.a; }
+}
+`);
+  assert.match(output, /function handle\(x: Foo\)/);
+});
+
+test('type-predicate guard narrows the exact guarded parameter, not other arguments', () => {
+  const { output } = infer(`
+class Foo { a = 1; }
+function isFoo(x: unknown): x is Foo { return true; }
+function handle(x: any, y: any) {
+  if (isFoo(x)) { return x.a; }
+  return y;
+}
+`);
+  assert.match(output, /function handle\(x: Foo, y: any\)/);
+});
+
+test('predicate guard narrows a chained variable through the call site', () => {
+  const { output } = infer(`
+class Foo { a = 1; }
+function isFoo(x: unknown): x is Foo { return true; }
+function handle(x: any) { if (isFoo(x)) { return x.a; } }
+let value: any;
+handle(value);
+let copy: any = value;
+`);
+  assert.match(output, /let value: Foo;/);
+  assert.match(output, /let copy: Foo = value;/);
+});
+
 test('unions typeof and instanceof narrowing into a parameter union', () => {
   const { output } = infer(`
 class Box { v = 1; }

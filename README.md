@@ -124,6 +124,23 @@ function handle(x: any) {
 
 精化只作用于 `object` / `Function` 这类无成员来源，**绝不污染** `instanceof` 推出的具体类（如 `Box`）或具体来源的联合——具体类自带成员表， incidental 访问不会塞进去。该证据标记为弱，后续轮次若有更具体的调用点类型会覆盖它。
 
+**收窄数组上的自定义方法**：`if (Array.isArray(xs))` 之后调用的**非迭代**方法（如 `xs.custom(cb)`）也被当作数组的真实成员交叉进来源——但只给方法本身一个带类型的签名，而**不臆造数组元素类型**（元素仍为 `unknown`）。回调首参的属性链被收集成回调参数形状，因此 `it.a.b` 在 strict 下可用；内置数组方法（push/map/…）被排除，不污染。回调参数不会再被多标一个 `unknown`（那会遮蔽上下文类型、重新触发 TS18046）：
+
+```ts
+function f(xs: any) {
+  if (Array.isArray(xs)) { xs.custom(it => it.a.b); }
+}
+// xs → unknown[] & { custom: (callback: (arg: { a: { b: unknown; }; }) => void) => unknown; }
+```
+
+**自定义类型谓词守卫**：`function isFoo(x: unknown): x is T` 形式的守卫调用 `if (isFoo(x))` 会把被守卫的实参 `x` 收窄为 `T` 并作为协变来源反推到参数与调用点（谓词类型从 callee 声明的 `TypePredicateNode` 读取，只匹配谓词指名的那个参数，不影响同一调用的其他实参）。与 `typeof` / `instanceof` / `Array.isArray` 守卫一样参与链式与跨文件传播：
+
+```ts
+class Foo { a = 1; }
+function isFoo(x: unknown): x is Foo { return true; }
+function handle(x: any) { if (isFoo(x)) { return x.a; } }  // x → Foo
+```
+
 **弱证据的二次精化**：从「方法调用 / 属性访问」合成的对象形状（`{ toFixed: fn }`）属于弱证据，会先临时定型；如果调用点实参在后续轮次推断出了更具体的类型，参数会被**精化**为该具体类型（number 自带 `toFixed`，天然满足这个形状）：
 
 ```ts

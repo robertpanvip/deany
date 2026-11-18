@@ -408,12 +408,14 @@ function f(xs) {
   );
 });
 
-test('a non-iteration method call does not fabricate an element shape', () => {
+test('a non-iteration method call adds a custom member without inventing an element shape', () => {
   const output = inferTs(`
 function f(x: any) { if (Array.isArray(x)) { x.custom(function (item) { void item.a; }); } }
 `);
-  // No known iteration method -> element shape stays unknown[] (no guessed { a }).
-  assert.match(output, /x: unknown\[\]/);
+  // The custom method is a real member and is kept with a typed callback, but
+  // the array's element type is NOT guessed from the callback (stays unknown[]).
+  assert.match(output, /unknown\[\] & \{ custom:/);
+  assert.match(output, /custom: \(callback: \(arg: \{ a: unknown; \}\) => void\) => unknown/);
   assert.doesNotMatch(output, /Array<\{ a:/);
 });
 

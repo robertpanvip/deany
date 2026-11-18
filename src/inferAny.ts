@@ -505,6 +505,41 @@ function renderPropertyShape(properties: ReadonlyMap<string, string>): string {
 }
 
 /**
+ * Build a typed callback signature for a custom method called on a narrowed
+ * array, e.g. `xs.custom(it => it.a.b)` becomes
+ * `(callback: (arg: { a: { b: unknown; }; }) => void) => unknown`. The element
+ * shape is structural evidence from the callback body, not a name guess, so
+ * `it.a.b` type-checks inside the callback.
+ */
+function customArrayMethodSignature(
+  call: ts.CallExpression,
+  ctx: InferenceContext,
+): string {
+  const callback = call.arguments[0];
+  if (
+    callback === undefined ||
+    (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) ||
+    callback.parameters.length === 0
+  ) {
+    return '(callback: (...args: unknown[]) => void) => unknown';
+  }
+  const elementParam = callback.parameters[0];
+  if (
+    elementParam === undefined ||
+    !ts.isIdentifier(elementParam.name) ||
+    callback.body === undefined
+  ) {
+    return '(callback: (...args: unknown[]) => void) => unknown';
+  }
+  const shape: ShapeNode = { children: new Map<string, ShapeNode>() };
+  for (const chain of propertyChainsOf(elementParam.name, callback.body, ctx)) {
+    insertShapeChain(shape, chain);
+  }
+  const argType = shape.children.size > 0 ? renderShapeNode(shape) : 'unknown';
+  return `(callback: (arg: ${argType}) => void) => unknown`;
+}
+
+/**
  * Array iteration methods whose callback's first parameter is an element. The
  * element's accessed property chain is a strong, structural hint about the
  * array's element type. `reduce`/`reduceRight` are excluded because their first
@@ -513,6 +548,15 @@ function renderPropertyShape(properties: ReadonlyMap<string, string>): string {
 const ITERATION_METHODS = new Set<string>([
   'map', 'forEach', 'filter', 'find', 'findIndex', 'some', 'every',
   'flatMap', 'includes', 'indexOf', 'lastIndexOf',
+]);
+
+/** Standard Array members — calling one says nothing about a custom shape. */
+const ARRAY_BUILTIN_MEMBERS = new Set<string>([
+  ...ITERATION_METHODS,
+  'push', 'pop', 'shift', 'unshift', 'slice', 'splice', 'concat', 'join',
+  'reverse', 'sort', 'fill', 'copyWithin', 'reduce', 'reduceRight', 'flat',
+  'entries', 'keys', 'values', 'length', 'at', 'findLast', 'findLastIndex',
+  'toReversed', 'toSorted', 'toSpliced', 'with', 'toString',
 ]);
 
 /**
@@ -560,12 +604,16 @@ function propertyChainsOf(
  * - `properties` describe an object's shape, used only as a last-resort source.
  * - `elementShape` describes an array element type inferred from iteration
  *   callback property chains; it refines an otherwise-unknown `unknown[]`.
+ * - `arrayOwnMethods` are custom methods called on an array binding (detected
+ *   via `Array.isArray` context); intersected into the array type so the calls
+ *   type-check without inventing an element shape for unknown methods.
  */
 interface Evidence {
   readonly sources: string[];
   readonly constraints: string[];
   readonly properties: Map<string, string>;
   readonly elementShape: ShapeNode;
+  readonly arrayOwnMethods: Map<string, string>;
 }
 
 function emptyEvidence(): Evidence {
@@ -574,6 +622,7 @@ function emptyEvidence(): Evidence {
     constraints: [],
     properties: new Map<string, string>(),
     elementShape: { children: new Map<string, ShapeNode>() },
+    arrayOwnMethods: new Map<string, string>(),
   };
 }
 
@@ -599,6 +648,66 @@ function isArrayIsArrayCall(call: ts.CallExpression): boolean {
     call.expression.expression.getText(call.getSourceFile()) === 'Array' &&
     call.expression.name.text === 'isArray'
   );
+}
+
+/**
+ * True if `node` sits inside a branch guarded by `Array.isArray(<same>)` —
+ * e.g. `if (Array.isArray(xs)) { xs.custom(...) }`. Walking up to the nearest
+ * conditional and testing its expression for an isArray call on the same
+ * binding identifies methods called on a value *after* it was narrowed to an
+ * array. Used to give those custom methods a typed callback signature.
+ */
+function isUnderArrayIsArrayGuard(node: ts.Identifier, ctx: InferenceContext): boolean {
+  const symbol = ctx.checker.getSymbolAtLocation(node);
+  let current: ts.Node | undefined = node;
+  while (current !== undefined) {
+    const parent: ts.Node | undefined = current.parent;
+    if (parent === undefined) {
+      break;
+    }
+    let guard: ts.Expression | undefined;
+    if (ts.isIfStatement(parent) && parent.thenStatement === current) {
+      guard = parent.expression;
+    } else if (ts.isConditionalExpression(parent) && parent.whenTrue === current) {
+      guard = parent.condition;
+    }
+    if (guard !== undefined && containsIsArrayCall(guard, node.text, symbol, ctx)) {
+      return true;
+    }
+    current = parent;
+  }
+  return false;
+}
+
+/** Does `expr` contain `Array.isArray(a)` on the same binding (by symbol or text)? */
+function containsIsArrayCall(
+  expr: ts.Expression,
+  name: string,
+  symbol: ts.Symbol | undefined,
+  ctx: InferenceContext,
+): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) {
+      return;
+    }
+    if (ts.isCallExpression(node) && isArrayIsArrayCall(node)) {
+      const arg = node.arguments[0];
+      if (arg !== undefined && ts.isIdentifier(arg)) {
+        const argSymbol = ctx.checker.getSymbolAtLocation(arg);
+        if (
+          (symbol !== undefined && argSymbol === symbol) ||
+          (symbol === undefined && arg.text === name)
+        ) {
+          found = true;
+          return;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(expr);
+  return found;
 }
 
 /**
@@ -632,6 +741,11 @@ const INDEXABLE_OBJECT = 'Record<PropertyKey, unknown>';
  * never by a "method name looks like X" guess.
  */
 const MEMBERLESS_OBJECT_SOURCES = new Set(['object', 'Function']);
+
+/** True for an array type string produced by this tool (`unknown[]`, `T[]`, `Array<T>`). */
+function isArrayTypeString(type: string): boolean {
+  return type === 'unknown[]' || type.endsWith('[]') || type.startsWith('Array<') || type.startsWith('ReadonlyArray<');
+}
 
 /** Bitwise operators coerce both operands to int32 in JavaScript. */
 const BITWISE_OPERATORS = new Set<ts.SyntaxKind>([
@@ -756,6 +870,59 @@ function instanceTypeOf(
   return text.length === 0 || text === 'any' || text === 'unknown' ? undefined : text;
 }
 
+/**
+ * For a custom type-guard call like `isFoo(x)` declared as
+ * `function isFoo(v: unknown): v is Foo`, return the type `Foo` that the guard
+ * narrows its argument to. `getResolvedSignature` erases the predicate, so read
+ * it from the callee declaration's `TypePredicateNode`. Only the predicate's
+ * own parameter (matched by symbol, then by name) is narrowed.
+ */
+function typePredicateOfArgument(
+  call: ts.CallExpression,
+  argument: ts.Expression,
+  ctx: InferenceContext,
+): string | undefined {
+  const declaration = ctx.checker.getResolvedSignature(call)?.declaration;
+  if (declaration === undefined || declaration.type === undefined) {
+    return undefined;
+  }
+  const signatureDeclaration = declaration as ts.SignatureDeclaration;
+  if (signatureDeclaration.type === undefined || !ts.isTypePredicateNode(signatureDeclaration.type)) {
+    return undefined;
+  }
+  const predicate = signatureDeclaration.type;
+  if (predicate.type === undefined) {
+    return undefined;
+  }
+  // Resolve which parameter the predicate names (`v is Foo` names `v`).
+  // `this is T` predicates have no named parameter and are not argument guards.
+  let predicateIndex = -1;
+  const parameterName =
+    typeof predicate.parameterName === 'string'
+      ? predicate.parameterName
+      : ts.isIdentifier(predicate.parameterName)
+        ? predicate.parameterName.text
+        : undefined;
+  if (parameterName === undefined) {
+    return undefined;
+  }
+  for (let i = 0; i < signatureDeclaration.parameters.length; i += 1) {
+    const p = signatureDeclaration.parameters[i];
+    if (p !== undefined && ts.isIdentifier(p.name) && p.name.text === parameterName) {
+      predicateIndex = i;
+      break;
+    }
+  }
+  if (predicateIndex < 0 || call.arguments[predicateIndex] !== argument) {
+    return undefined;
+  }
+  const type = ctx.checker.getTypeAtLocation(predicate.type);
+  const text = sanitizeInstanceType(
+    ctx.checker.typeToString(type, predicate.type, TYPE_FORMAT).trim(),
+  );
+  return text.length === 0 || text === 'any' || text === 'unknown' ? undefined : text;
+}
+
 /** Extract constraints from one reference to the `any`-typed binding. */
 function constraintsFromReference(
   reference: ts.Identifier,
@@ -799,6 +966,23 @@ function constraintsFromReference(
     } else {
       evidence.properties.set(parent.name.text, typeText(ctx, parent) ?? 'unknown');
     }
+
+    // `if (Array.isArray(xs)) { xs.custom(cb) }`: a custom method called on a
+    // narrowed array is a real member of that value. Record a typed signature
+    // (building the callback's element shape from what its body accesses) so
+    // both `xs.custom(...)` and the callback body type-check. Standard Array
+    // members are excluded — they carry no information about a custom shape.
+    if (
+      isMethodCall &&
+      ts.isIdentifier(reference) &&
+      !ARRAY_BUILTIN_MEMBERS.has(parent.name.text) &&
+      isUnderArrayIsArrayGuard(reference, ctx)
+    ) {
+      evidence.arrayOwnMethods.set(
+        parent.name.text,
+        customArrayMethodSignature(grandparent as ts.CallExpression, ctx),
+      );
+    }
   }
 
   // `this.field = expr` / `obj.field = expr`: the reference is the property name.
@@ -817,6 +1001,13 @@ function constraintsFromReference(
   // strict mode stays intact without inventing an element type.
   if (ts.isCallExpression(parent) && parent.arguments[0] === reference && isArrayIsArrayCall(parent)) {
     addSource(evidence, 'unknown[]');
+  } else if (
+    ts.isCallExpression(parent) &&
+    typePredicateOfArgument(parent, reference, ctx) !== undefined
+  ) {
+    // `if (isFoo(x))` where `isFoo(v): v is T` narrows x to T. This is a real
+    // control-flow type guard, so T is a covariant source for the binding.
+    addSource(evidence, typePredicateOfArgument(parent, reference, ctx));
   } else if (ts.isCallExpression(parent)) {
     const index = parent.arguments.indexOf(reference);
     if (index >= 0) {
@@ -1323,6 +1514,20 @@ function mergeEvidence(evidence: Evidence): {
     sources[0] = `Array<${renderShapeNode(evidence.elementShape)}>`;
   }
 
+  // Custom methods called on an `Array.isArray`-narrowed array are real members
+  // of that value. Intersect their typed signatures so `xs.custom(cb)` and the
+  // callback body type-check — the callback element shape is structural
+  // evidence from its body, not a name guess. Only array sources are touched;
+  // standard Array members were filtered out when the evidence was collected.
+  if (
+    evidence.arrayOwnMethods.size > 0 &&
+    sources.length === 1 &&
+    sources[0] !== undefined &&
+    isArrayTypeString(sources[0])
+  ) {
+    sources[0] = `${sources[0]} & ${renderPropertyShape(evidence.arrayOwnMethods)}`;
+  }
+
   // A type guard narrows a value to a memberless category (`object` / `Function`),
   // and real method/property calls on that narrowed value declare the members
   // it must have. Intersect those members back so strict mode accepts the
@@ -1674,6 +1879,40 @@ function isInferredArrayElementParameter(
   return inferred !== undefined && inferred.startsWith('Array<');
 }
 
+/**
+ * True when `param` is the callback of a custom method called on a narrowed
+ * array (`xs.custom(it => ...)`) whose receiver was inferred with a typed
+ * method signature via an intersection. The rewritten source supplies a
+ * contextual parameter type, so an `unknown` annotation must not be added.
+ */
+function isCustomArrayMethodCallback(
+  param: ts.ParameterDeclaration,
+  ctx: InferenceContext,
+): boolean {
+  const func = param.parent;
+  if (!isFunctionLike(func) || func.parameters[0] !== param) {
+    return false;
+  }
+  const call = func.parent;
+  if (!ts.isCallExpression(call) || call.arguments[0] !== func) {
+    return false;
+  }
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee) || ARRAY_BUILTIN_MEMBERS.has(callee.name.text)) {
+    return false;
+  }
+  let symbol = ctx.checker.getSymbolAtLocation(callee.expression);
+  if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+    symbol = ctx.checker.getAliasedSymbol(symbol);
+  }
+  const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+  if (declaration === undefined) {
+    return false;
+  }
+  const inferred = ctx.table.declarations.get(declaration);
+  return inferred !== undefined && inferred.includes('&') && isArrayTypeString(inferred.split('&')[0]?.trim() ?? '');
+}
+
 /** Create a usage resolver over a set of root files (JS or TS). */
 export function createUsageResolver(
   rootNames: readonly string[],
@@ -1701,6 +1940,9 @@ export function createUsageResolver(
       // contextual element type. Annotating it `unknown` would override that
       // and reintroduce TS18046, so leave it unannotated.
       if (isInferredArrayElementParameter(param, ctx)) {
+        return false;
+      }
+      if (isCustomArrayMethodCallback(param, ctx)) {
         return false;
       }
       const apparent = checker.getTypeAtLocation(paramExpr);
