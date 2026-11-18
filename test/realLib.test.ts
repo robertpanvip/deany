@@ -735,3 +735,26 @@ export function f(xs) { return Math.max(...xs); }
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
+
+test('builtin method return survives a reassigned receiver (normalize-path segs)', () => {
+  // checkJs types `path` as `any` at the later `path.split()` call after
+  // `path = path.slice(2)`, losing String#split's signature. The tool has
+  // already inferred `path: string`, so `split()` must still yield string[] —
+  // not Record<PropertyKey, unknown>, which broke length/pop/join (TS18046).
+  const { output, diagnostics } = convertJs(`
+module.exports = function(path) {
+  if (typeof path !== 'string') { throw new TypeError('x'); }
+  var prefix = '';
+  path = path.slice(2);
+  var segs = path.split('/');
+  segs.pop();
+  return prefix + segs.join('/');
+};
+`);
+  assert.match(output, /var segs: (string\[\]|Array<string>)/);
+  assert.doesNotMatch(output, /var segs: Record<PropertyKey, unknown>/);
+  assert.ok(
+    diagnostics.every((d) => !/TS18046/.test(d)),
+    diagnostics.join('\n'),
+  );
+});

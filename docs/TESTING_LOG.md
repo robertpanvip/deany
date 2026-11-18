@@ -295,6 +295,27 @@
 - **P6（本轮新发现，真实存在并已修复）**：`const rec: Record<string, any> = { a: 1, b: 2 }` 被推断为 `Record<string, { a: number; b: number; }>` → TS2322。根因：`any` 在 Record 的 `[1]` 值槽位，而对象字面量初始化器被 checker 报告为整体形状（无 `<...>`），`projectSlotType` 无法投影、回退返回整个对象；Map/Array 的 wholeType 本身是泛型形式故不受影响。修复：`inferAny.ts` 新增 `recordValueSlotType`，识别 `Record`/`ReadonlyRecord` 值槽位 + 对象字面量初始化器，直接从字面量各属性值推断槽位类型（用既有 `mergeMutationEvidence` 联合去重），主循环投影处优先采用；不匹配时仍走原投影路径。结果 `Record<string, number>`，strict 通过。混合值、`ReadonlyRecord`、嵌套对象值均覆盖。
 - **验证**：新增 4 个回归测试（`test/inferAny.test.ts`），全套 **190/190 全绿**，typecheck/build 通过。
 
+## 定时压测第 21~35 轮补录（会话内后台脚本 · 事后归类）
+
+背景：第七轮启动的会话内定时压测（任务 `YRXO76`，第 21~60 轮、每 10 分钟抽 3 库）因沙箱休眠在**第 35 轮中断**，后台任务丢失。报告已落盘 `round_21~35.json/.txt`，但第 22~35 轮当时**未被主会话逐轮读取归类**（只有第 21 轮在 19:00 读过一次，判 8→8 无新缺陷）。本轮补做归类，恢复可追溯性。合计 15 轮 / 45 个库样本（去重约 20 库），诊断 1693→1504（全部轮次累计）。
+
+归类结论（第 22~35 轮）：
+
+| 类别 | 库（轮次） | 诊断变化 | 判定依据 |
+| --- | --- | --- | --- |
+| **真实缺陷（本轮修复）** | normalize-path（22/30/32/34） | 2→5 | `var segs = path.split()` 在 `path = path.slice(2)` 重赋值后 checker 视 receiver 为 any，签名丢失 → segs 被推成 `Record<PropertyKey, unknown>`，`segs.length/pop/join` 报 TS18046×3 + TS2322。详见下方。 |
+| 缺依赖级联（TS2307/TS2306） | is-string / is-number-object / is-boolean-object（多轮）、is-symbol、p-waterfall、is-generator-function | 多为 2→2 / 3→4 / 5→1 | 缺 `call-bound`/`safe-regex-test`/`p-*` 依赖， chained 类型退化为 unknown；is-symbol 的 2×TS2322 是类型谓词丢失级联，与第九轮"类型谓词冲突不修"一致。 |
+| 动态性/大库反射（固有限制） | p-queue（66→81~115）、fill-range（57→35~43）、object-inspect、pify | 改善或未清零 | TS2571×32（unknown 上运算）、TS2345×18（动态参数）、TS2339 反射访问，多因素叠加，历轮已判非单点可修。 |
+| 回调/闭包/`this` 动态参数 | delay / p-debounce / p-locate / map-obj / is-callable | 18→8 / 39→25 / 19→15 / 20→16 | 余项为 TS2683(this)、TS18048(闭包内)、TS2550(ES 版本门槛)、缺依赖，历轮已判定。 |
+| 非工具问题 | pWait（31 轮） | DOWNLOAD_FAILED | 下载失败，如实跳过。 |
+
+### 本轮修复：重赋值接收者导致内建方法签名丢失（normalize-path segs）
+
+- **现象**：`if (typeof path !== 'string') throw; path = path.slice(2); var segs = path.split(...)` 中，`segs` 被推成 `Record<PropertyKey, unknown>`（2→5 条诊断，TS18046×3 + TS2322），而正确的 `string[]` 明明就摆在 checker 眼前（无重赋值时 `typeOf(path.split()) = string[]`）。
+- **根因**：JS 文件里 `path = path.slice(2)` 让 checkJs 在后续 `path.split()` 处把 receiver 视为 `any`（RHS `path.slice()` 自身 opaque，污染控制流），`getResolvedSignature` 为 none，签名丢失。工具其实已确证 `infer(path) = string`，但 `typeText` 的兜底 `resolveViaTable` 对 call 只能在 resolved signature 存在时取返回类型，此处拿不到 → source 丢失；`segs` 转而靠 `segs[k]` 索引约束（`Record<PropertyKey, unknown>`）+ `.pop()` 方法形状兜底。
+- **修复**：`typeText` 增加 `builtinCallResultFromReceiver` 兜底——当 call 的 checker 类型 opaque 且是 `X.method()` 形式时，仅当 receiver 的**推断表类型**已是具体内建 primitive（string/number/Date）、且方法在该族的 `UNIQUE_BUILTIN_METHODS` 中、`BUILTIN_METHOD_RETURN` 有确定返回（如 `split → string[]`）时，返回该 lib 签名结果。**不是按方法名臆测 receiver**：receiver 类型必须先被独立确证。
+- **效果**：with-reassign 与真实 normalize-path 模式的 `segs` 均为 `string[]`，segs 相关 TS18046×3 + TS2322 清零；完整样本诊断 5→1（余 1 条 `ch = path[2]` 的 `string|undefined`，属既有的字符串索引问题，原 JS 在 checkJs 下同型，不在本信号范围）。`test/realLib.test.ts` 新增回归测试 `builtin method return survives a reassigned receiver`，全套 **191/191 全绿**，typecheck/build 通过。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。

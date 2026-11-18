@@ -391,6 +391,42 @@ function resolveViaTable(ctx: InferenceContext, node: ts.Node): string | undefin
 }
 
 /**
+ * Recover the return type of a built-in method call whose checker type went
+ * opaque because the receiver was reassigned in a JS file (checkJs then types
+ * the reassigned binding as `any` at later call sites, losing the signature).
+ * This is NOT a method-name guess: it fires only when the receiver's own
+ * inferred type is already a concrete builtin primitive (string/number/Date)
+ * via the inference table, and the method is unique to that family in lib.d.ts
+ * with a known return type. Under those conditions the lib signature is
+ * deterministic evidence, e.g. an inferred-`string` receiver calling `split`
+ * yields `string[]`.
+ */
+function builtinCallResultFromReceiver(ctx: InferenceContext, node: ts.Node): string | undefined {
+  if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(node.expression)) {
+    return undefined;
+  }
+  const receiver = node.expression.expression;
+  // Only a statically known lib-unique method qualifies.
+  const method = node.expression.name.text;
+  const builtinReturn = BUILTIN_METHOD_RETURN.get(method);
+  if (builtinReturn === undefined) {
+    return undefined;
+  }
+  // The receiver must already be inferred as a concrete builtin primitive —
+  // never guess from the method name alone. resolveViaTable reads the table
+  // entry for an identifier/property-access receiver.
+  const receiverType = resolveViaTable(ctx, receiver);
+  if (receiverType === undefined) {
+    return undefined;
+  }
+  const normalized = receiverType.trim();
+  const matchesFamily = UNIQUE_BUILTIN_METHODS.some(
+    (family) => normalized === family.type && family.methods.has(method),
+  );
+  return matchesFamily ? builtinReturn : undefined;
+}
+
+/**
  * `Object(value)` boxes its argument into an object (primitives become their
  * wrapper objects); lib.d.ts types the return as `any`, which carries no
  * information. Recognize only the genuine global constructor — the symbol's
@@ -422,11 +458,15 @@ function typeText(
   const raw = type ?? ctx.checker.getTypeAtLocation(node);
   const widened = ctx.checker.getWidenedType(raw);
   if (widened.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) {
-    return objectConstructorResult(ctx, node) ?? resolveViaTable(ctx, node);
+    return (
+      objectConstructorResult(ctx, node) ??
+      resolveViaTable(ctx, node) ??
+      builtinCallResultFromReceiver(ctx, node)
+    );
   }
   const text = widenedTypeText(ctx.checker, widened, node);
   if (text.length === 0 || text === 'any' || text === 'unknown') {
-    return resolveViaTable(ctx, node);
+    return resolveViaTable(ctx, node) ?? builtinCallResultFromReceiver(ctx, node);
   }
   return text;
 }
