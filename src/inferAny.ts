@@ -1548,6 +1548,35 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
         ) {
           evidence.objectLiteralInit = true;
         }
+        // A destructured parameter with defaults — `function f({ a = 1, b = 'x' } = {})`
+        // — declares its own shape through the binding elements' default values.
+        // Those defaults are authoritative observed values, so synthesize the
+        // object shape from them. Without this, the `= {}` initializer alone
+        // yields a bare `{}` and every `a`/`b` access raises TS2339. Marking
+        // objectLiteralInit lets mergeEvidence emit the fields as optional
+        // (the whole argument may be omitted), matching the checker's own
+        // `{ a?: number; b?: string }` shape.
+        if (
+          ts.isParameter(owner) &&
+          ts.isObjectBindingPattern(owner.name) &&
+          init !== undefined
+        ) {
+          for (const element of owner.name.elements) {
+            if (element.dotDotDotToken !== undefined) {
+              continue;
+            }
+            const keyNode = element.propertyName ?? element.name;
+            if (!ts.isIdentifier(keyNode) && !ts.isStringLiteral(keyNode) && !ts.isNumericLiteral(keyNode)) {
+              continue;
+            }
+            const key = keyNode.text;
+            const fieldType =
+              (element.initializer !== undefined ? typeText(ctx, element.initializer) : undefined) ?? 'unknown';
+            if (!evidence.properties.has(key)) {
+              evidence.properties.set(key, fieldType);
+            }
+          }
+        }
         // A CommonJS `require('mod')` initializer prints as a self-referential
         // type (`typeof util`, `path.PlatformPath`, `typeof fs`) that TypeScript
         // rejects (TS2502/TS2503). Re-express it as `typeof import("mod")`,

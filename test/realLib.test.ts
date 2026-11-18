@@ -536,3 +536,26 @@ try {
   assert.match(output, /var util: typeof import\("util"\)/);
   assert.doesNotMatch(output, /var util: typeof util\b/);
 });
+
+test('destructured parameter defaults synthesize an optional object shape (decamelize/p-locate)', () => {
+  const { output, diagnostics } = convertJs(`
+export function f(text, { separator = '_', preserve = false, count = 1 } = {}) {
+  return text + separator + preserve + count;
+}
+`);
+  assert.match(output, /\{ separator\?: string; preserve\?: boolean; count\?: number; \}/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('destructured parameter with renamed and quoted keys stays strict-clean', () => {
+  const { output } = convertJs(`
+export function f({ a: renamed = 1, 'kebab-key': k = 'x', } = {}) {
+  return renamed + k;
+}
+`);
+  // The property name (not the local binding) is the object field.
+  assert.match(output, /\{ a\?: number; "kebab-key"\?: string; \}/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});

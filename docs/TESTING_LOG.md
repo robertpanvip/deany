@@ -102,8 +102,32 @@
 
 **p-any 剩余 7 条（未修，固有限制）**：3×TS2307 缺 `p-some`/`p-cancelable` 依赖；TS2698/TS18046/TS2339/TS2488 源于 `PCancelable.fn(async onCancel => ...)` 回调参数——外部库 API + 依赖缺失，无法可靠推断，留 `unknown` 是保守正确。
 
+### 第二轮（随机抽中 quick-lru / decamelize / p-memoize）
+
+| 库 | 版本 | strict 诊断（原始 → 转换后 → 修复后） |
+| --- | --- | --- |
+| quick-lru | 6.1.1 | 57 → 43（TS4114 ×13 为 class override 检查门槛，非转换缺陷） |
+| decamelize | 5.0.1 | 3 → 4 → **2**（修复后仅余 2×TS1501 检查门槛误报） |
+| p-memoize | 7.1.1 | 15 → 22（多为缺依赖 `mimic-fn` 级联 + `this` 隐式类型） |
+
+### 第三轮（随机抽中 array-flatten / p-locate / pify）
+
+| 库 | 版本 | strict 诊断（原始 → 转换后 → 修复后） |
+| --- | --- | --- |
+| array-flatten | 2.1.2 | 6 → **0** |
+| p-locate | 6.0.0 | 9 → 9 → **7**（解构字段 TS2339 减少，余为缺依赖 `p-limit` 级联） |
+| pify | 5.0.0 | 20 → 34（回调/rest 参数动态性，固有限制） |
+
+**本轮修复：解构参数默认值字段丢失（decamelize / p-locate）**
+
+`function f(text, { separator = '_', preserve = false } = {})` 被推成 `text, { ... }: {}`，字段 `separator`/`preserve` 全丢，每次访问报 TS2339。根因：`collectEvidence` 对解构参数只用 `= {}` 初始化器推成裸 `{}`，从未从 binding element 的默认值收集字段类型——尽管 checker 本身能精确推出 `{ separator?: string; preserve?: boolean }`。
+
+修复：owner 是参数且 name 为 ObjectBindingPattern 时，遍历 binding elements，用 `typeText(ctx, element.initializer)`（widened）收集每个字段的类型进 `evidence.properties`；`objectLiteralInit` 使 `mergeEvidence` 以可选字段输出（`{ separator?: string; ... }`，参数可整体省略），与 checker 形状一致。字段名取 `propertyName`（属性名而非本地绑定名），带引号的非法标识符正确 JSON 引用。最小复现（单/多默认值、重命名键、引号键）全部 strict-clean。`test/realLib.test.ts` 新增 2 条回归测试。实测 decamelize 4→2（TS2339×2 清零）、p-locate 9→7。**155/155 测试全绿**。
+
+**未修（固有限制/检查门槛）**：TS1501（正则 `v`/`s` flag，checkStrict 固定 ES2022 的门槛误报，产物与源码一致）、TS4114（class override）、缺依赖级联（TS2307）、`this` 隐式类型（TS2683）、回调/rest 动态参数。
+
 ## 待选库（尚未测试，供下一轮参考）
 
-预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-locate`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。
+预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。
 
 > 拉取失败或网络不可用时如实记录并跳过，不要伪造结果。每轮聚焦一个真实缺陷做扎实，不追求诊断数清零——`unknown`/`void` 是保守设计的正确兜底。
