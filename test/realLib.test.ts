@@ -362,3 +362,58 @@ function probe(x) { x ||= 7; return x; }
   assert.match(output, /x: number/);
   assert.ok(!diagnostics.some((d) => d.includes('TS18046')), diagnostics.join('\n'));
 });
+
+// --- Array element shape from iteration callback property chains ---
+
+test('Array.isArray + map deep property chain infers an array of shaped objects (TS)', () => {
+  const output = inferTs(`
+function f(x: any) {
+  if (Array.isArray(x)) {
+    x.map(function (item) { return item.a.b.c; });
+  }
+}
+`);
+  assert.match(output, /x: Array<\{ a: \{ b: \{ c: unknown; \}; \}; \}>/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('iteration callback element shape merges multiple property chains', () => {
+  const output = inferTs(`
+function f(xs: any) {
+  if (Array.isArray(xs)) {
+    xs.forEach(function (it) { void it.name; void it.age.year; });
+  }
+}
+`);
+  assert.match(output, /xs: Array<\{ age: \{ year: unknown; \}; name: unknown; \}>/);
+});
+
+test('Array.isArray + forEach deep chain infers element shape in JS implicit-any mode', () => {
+  const { output, diagnostics } = convertJs(`
+function f(xs) {
+  if (Array.isArray(xs)) {
+    xs.forEach(function (item) { void item.a.b; });
+  }
+  return xs;
+}
+`);
+  assert.match(output, /xs: Array<\{ a: \{ b: unknown; \}; \}>/);
+  // Re-check the emitted code as TypeScript: a redundant `item: unknown`
+  // annotation would shadow the element shape and reintroduce TS18046.
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  assert.ok(
+    !diagnostics.some((d) => d.includes('TS18046') || d.includes('TS2339')),
+    diagnostics.join('\n'),
+  );
+});
+
+test('a non-iteration method call does not fabricate an element shape', () => {
+  const output = inferTs(`
+function f(x: any) { if (Array.isArray(x)) { x.custom(function (item) { void item.a; }); } }
+`);
+  // No known iteration method -> element shape stays unknown[] (no guessed { a }).
+  assert.match(output, /x: unknown\[\]/);
+  assert.doesNotMatch(output, /Array<\{ a:/);
+});

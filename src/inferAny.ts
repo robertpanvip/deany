@@ -462,21 +462,110 @@ function callsOf(
 }
 
 /**
+ * A node in a recursively collected property-shape tree. Used to describe the
+ * element type of an array from the property chains accessed on an iteration
+ * callback's element parameter (e.g. `xs.map(it => it.a.b)` -> { a: { b: unknown } }).
+ */
+interface ShapeNode {
+  readonly children: Map<string, ShapeNode>;
+}
+
+function insertShapeChain(root: ShapeNode, chain: readonly string[]): void {
+  let node = root;
+  for (const key of chain) {
+    let child = node.children.get(key);
+    if (child === undefined) {
+      child = { children: new Map<string, ShapeNode>() };
+      node.children.set(key, child);
+    }
+    node = child;
+  }
+}
+
+function renderShapeNode(node: ShapeNode): string {
+  if (node.children.size === 0) {
+    return 'unknown';
+  }
+  const fields = [...node.children.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, child]) => {
+      const name = /^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key);
+      return `${name}: ${renderShapeNode(child)};`;
+    });
+  return `{ ${fields.join(' ')} }`;
+}
+
+/**
+ * Array iteration methods whose callback's first parameter is an element. The
+ * element's accessed property chain is a strong, structural hint about the
+ * array's element type. `reduce`/`reduceRight` are excluded because their first
+ * callback parameter is the accumulator, not an element.
+ */
+const ITERATION_METHODS = new Set<string>([
+  'map', 'forEach', 'filter', 'find', 'findIndex', 'some', 'every',
+  'flatMap', 'includes', 'indexOf', 'lastIndexOf',
+]);
+
+/**
+ * Collect every property-access chain rooted at `root` inside `body` as an
+ * array of key paths (e.g. `root.a.b` -> ['a', 'b']). Symbol identity is
+ * checked when available so a same-named inner variable is not mistaken for
+ * the callback element.
+ */
+function propertyChainsOf(
+  root: ts.Identifier,
+  body: ts.Node,
+  ctx: InferenceContext,
+): string[][] {
+  const rootSymbol = ctx.checker.getSymbolAtLocation(root);
+  const chains: string[][] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(node)) {
+      const chain: string[] = [];
+      let current: ts.Expression = node;
+      while (ts.isPropertyAccessExpression(current)) {
+        chain.unshift(current.name.text);
+        current = current.expression;
+      }
+      if (ts.isIdentifier(current)) {
+        const symbol = ctx.checker.getSymbolAtLocation(current);
+        const same = symbol !== undefined && symbol === rootSymbol;
+        const sameText = symbol === undefined && rootSymbol === undefined && current.text === root.text;
+        if ((same || sameText) && chain.length > 0) {
+          chains.push(chain);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(body);
+  return chains;
+}
+
+/**
  * Usage evidence is split by variance:
  * - `sources` are covariant (values the binding receives: initializers,
  *   assignments, returns, arithmetic). Multiple sources form a union.
  * - `constraints` are contravariant (types the binding must be assignable to,
  *   e.g. when passed as a call argument). Multiple constraints are intersected.
  * - `properties` describe an object's shape, used only as a last-resort source.
+ * - `elementShape` describes an array element type inferred from iteration
+ *   callback property chains; it refines an otherwise-unknown `unknown[]`.
  */
 interface Evidence {
   readonly sources: string[];
   readonly constraints: string[];
   readonly properties: Map<string, string>;
+  readonly elementShape: ShapeNode;
 }
 
 function emptyEvidence(): Evidence {
-  return { sources: [], constraints: [], properties: new Map<string, string>() };
+  return {
+    sources: [],
+    constraints: [],
+    properties: new Map<string, string>(),
+    elementShape: { children: new Map<string, ShapeNode>() },
+  };
 }
 
 function addSource(evidence: Evidence, type: string | undefined): void {
@@ -748,6 +837,37 @@ function constraintsFromReference(
   // `new Ctor()`: same idea, but the value must be constructable.
   if (ts.isNewExpression(parent) && parent.expression === reference) {
     addConstraint(evidence, 'new (...args: unknown[]) => unknown');
+  }
+
+  // `xs.map/forEach(it => it.a.b)`: the receiver is an array, and the property
+  // chains accessed on the callback's element parameter describe its element
+  // type. Collect them into a shape tree; mergeEvidence uses it to refine an
+  // otherwise-opaque `unknown[]` into `Array<{...}>`. This is structural evidence
+  // (the code actually depends on those properties), not a heuristic guess.
+  if (
+    ts.isPropertyAccessExpression(parent) &&
+    parent.expression === reference &&
+    ts.isCallExpression(parent.parent) &&
+    parent.parent.expression === parent &&
+    ITERATION_METHODS.has(parent.name.text)
+  ) {
+    const callback = parent.parent.arguments[0];
+    if (
+      callback !== undefined &&
+      (ts.isArrowFunction(callback) || ts.isFunctionExpression(callback)) &&
+      callback.parameters.length > 0
+    ) {
+      const elementParam = callback.parameters[0];
+      if (
+        elementParam !== undefined &&
+        ts.isIdentifier(elementParam.name) &&
+        callback.body !== undefined
+      ) {
+        for (const chain of propertyChainsOf(elementParam.name, callback.body, ctx)) {
+          insertShapeChain(evidence.elementShape, chain);
+        }
+      }
+    }
   }
 
   // Spreading `[...x]` or `f(...x)` requires x to be iterable. `unknown[]` is
@@ -1156,6 +1276,18 @@ function mergeEvidence(evidence: Evidence): {
   const sources = [...new Set(evidence.sources.flatMap(splitTopLevelUnion))];
   const allowed = intersectConstraints(evidence.constraints);
   let members: string[];
+
+  // Refine an otherwise-opaque `unknown[]` into an array of the shape collected
+  // from iteration callback property chains. Only when `unknown[]` is the sole
+  // source: a concrete array source (e.g. `number[]` from a call site) wins.
+  if (
+    evidence.elementShape.children.size > 0 &&
+    sources.length === 1 &&
+    sources[0] === 'unknown[]'
+  ) {
+    sources[0] = `Array<${renderShapeNode(evidence.elementShape)}>`;
+  }
+
   // A shape synthesized purely from accessed properties is weak evidence: a
   // later round may find a concrete type (e.g. a call-site argument) that is
   // more precise and should replace it.
@@ -1432,6 +1564,40 @@ export interface UsageResolver {
   readonly isImplicitAnyParameter: (param: ts.ParameterDeclaration) => boolean;
 }
 
+/**
+ * True when `param` is the element parameter of a known iteration callback
+ * whose receiver binding was inferred as an array of shapes. In that case the
+ * rewritten source gives the parameter a contextual type, so it must not be
+ * annotated (a redundant `unknown` would shadow the element shape).
+ */
+function isInferredArrayElementParameter(
+  param: ts.ParameterDeclaration,
+  ctx: InferenceContext,
+): boolean {
+  const func = param.parent;
+  if (!isFunctionLike(func) || func.parameters[0] !== param) {
+    return false;
+  }
+  const call = func.parent;
+  if (!ts.isCallExpression(call) || !call.arguments.includes(func as ts.Expression)) {
+    return false;
+  }
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee) || !ITERATION_METHODS.has(callee.name.text)) {
+    return false;
+  }
+  let symbol = ctx.checker.getSymbolAtLocation(callee.expression);
+  if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+    symbol = ctx.checker.getAliasedSymbol(symbol);
+  }
+  const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+  if (declaration === undefined) {
+    return false;
+  }
+  const inferred = ctx.table.declarations.get(declaration);
+  return inferred !== undefined && inferred.startsWith('Array<');
+}
+
 /** Create a usage resolver over a set of root files (JS or TS). */
 export function createUsageResolver(
   rootNames: readonly string[],
@@ -1452,6 +1618,13 @@ export function createUsageResolver(
       // parameter nodes here; the Expression cast satisfies the TS type surface.
       const paramExpr = param as unknown as ts.Expression;
       if (checker.getContextualType(paramExpr) !== undefined) {
+        return false;
+      }
+      // If this parameter is an iteration callback's element and the receiver
+      // was inferred as an array of shapes, the rewritten source will supply a
+      // contextual element type. Annotating it `unknown` would override that
+      // and reintroduce TS18046, so leave it unannotated.
+      if (isInferredArrayElementParameter(param, ctx)) {
         return false;
       }
       const apparent = checker.getTypeAtLocation(paramExpr);

@@ -68,6 +68,7 @@ node bin/jsdoc2ts.js infer-any app.ts -o app.inferred.ts --check
 | 参数默认值 / 位运算 / 关系比较 / `in` | `f(x = 5)`→`number`；`x\|0`/`~x`→`number`；`x > 10`→`number \| string`；`'k' in x`→`object` |
 | `for...of` / 解构 / `await` / 分支 | `for (v of x)`→`unknown[]`；`{ foo } = x`→对象形状；`await x`→`PromiseLike<unknown>`；`x \|\| fallback`/三元→对侧类型作联合来源 |
 | 幂运算 / 注解目标 / 展开 / 短路赋值 | `x ** 2`→`number`；`const n: number = x`→逆变约束 `number`（仅认显式注解）；`[...x]`/`f(...x)`→`unknown[]`（对象展开 `{...x}` 不推）；`x \|\|= 5`/`x ??= 'fb'`→`number`/`string` |
+| 迭代回调元素形状 | `Array.isArray(x)` + `x.map(it => it.a.b)` → `x: Array<{ a: { b: unknown } }>`；从已知迭代方法（map/forEach/filter/…）回调首参的属性访问链递归合成元素形状，只精化原本的 `unknown[]`（具体来源仍优先）；`reduce` 等首参为累加器的方法排除 |
 
 证据按**方差**分组并按各自规则合并：
 
@@ -264,7 +265,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 127 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、默认值/位运算/比较/in、for-of/解构/await/分支、幂运算/注解目标/展开/短路赋值、typeof function 合法化、catch 变量注解规避、弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
+npm test            # 131 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、默认值/位运算/比较/in、for-of/解构/await/分支、幂运算/注解目标/展开/短路赋值、迭代回调元素深层形状、typeof function 合法化、catch 变量注解规避、弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
@@ -308,6 +309,7 @@ npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
 - 参数默认值、位运算（`| & ^ << >> >>> ~`）、关系比较（`< > <= >=` → `number | string`）、`'k' in x` → `object`。
 - `for...of` / 数组解构目标 → `unknown[]`；对象解构 → 对象形状；`await x` → `PromiseLike<unknown>`；`x || fallback` / 三元 → 对侧类型作联合来源。
 - 幂运算 `x ** 2` → `number`（补齐算术白名单）；`const n: number = x` 的**显式**注解 → 逆变约束 `number`（无注解或 `any`/`unknown` 不算，与具体来源冲突时来源胜出）；`[...x]` / `f(...x)` → `unknown[]`（对象展开 `{...x}` 不推）；短路赋值 `x ||= 5` / `x ??= 'fb'` → `number` / `string`。
+- `Array.isArray(x)` 配合 `x.map/forEach(it => it.a.b)` 等已知迭代调用，从回调首参的**属性访问链**递归合成元素形状，把 `unknown[]` 精化为 `Array<{ a: { b: unknown } }>`（多条链合并、只含实际访问的属性；具体来源优先；`reduce` 等首参为累加器的方法排除）。JS 隐式 any 模式下，这类元素参数不再被多加 `item: unknown` 注解而覆盖上下文类型。
 
 仍存在的局限（属于"JS 动态模式 → strict TS"的固有难度，非语法 bug）：
 
