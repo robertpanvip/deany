@@ -1,4 +1,4 @@
-import type { ConvertOptions, JsDocTag } from './types.js';
+import { DEFAULT_OPTIONS, type ConvertOptions, type JsDocTag } from './types.js';
 
 /** Split on a separator while respecting nested generic/call/object brackets. */
 export function splitTopLevel(text: string, separator: string): string[] {
@@ -73,6 +73,31 @@ function convertFunctionType(text: string, options: ConvertOptions): string | un
   return `(${params.join(', ')}) => ${returns}`;
 }
 
+/**
+ * Strip one layer of parentheses that wrap the ENTIRE expression, and only
+ * when the opening paren's matching close is the last character. This avoids
+ * touching meaningful groupings such as `(a)|(b)` where the first `)` closes
+ * before the end. Returns undefined when there is no such wrapping pair.
+ */
+function stripOuterParens(text: string): string | undefined {
+  if (!text.startsWith('(') || !text.endsWith(')')) {
+    return undefined;
+  }
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i] ?? '';
+    if (ch === '(') {
+      depth += 1;
+    } else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        return i === text.length - 1 ? text.slice(1, -1).trim() : undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
 /** True when `=>` occurs at bracket depth 0, i.e. the whole expression is an arrow type. */
 export function hasTopLevelArrow(text: string): boolean {
   let depth = 0;
@@ -105,7 +130,7 @@ function appendArray(type: string): string {
 }
 
 /** Normalize one JSDoc type expression into valid TypeScript type syntax. */
-export function normalizeJsDocType(raw: string, options: ConvertOptions): string {
+export function normalizeJsDocType(raw: string, options: ConvertOptions = DEFAULT_OPTIONS): string {
   let type = raw.trim().replace(/\s+/g, ' ');
   if (type.length === 0) {
     return options.defaultType;
@@ -153,6 +178,18 @@ export function normalizeJsDocType(raw: string, options: ConvertOptions): string
   const fn = convertFunctionType(type, options);
   if (fn !== undefined) {
     return fn;
+  }
+
+  // A union member or the whole expression may be wrapped in a redundant pair
+  // of parens, e.g. `(function():number)|string` or `(number|function():void)`.
+  // The top-level split above cannot see inside the parens, and
+  // convertFunctionType's `^function` anchor rejects the leading `(`, so
+  // without this the raw JSDoc `function(...)` syntax leaks into the output
+  // and TypeScript reports TS8020. Strip one balanced outer pair and recurse
+  // so every path (union member, typedef, parenthesized union) converges.
+  const stripped = stripOuterParens(type);
+  if (stripped !== undefined && stripped !== type && stripped.length > 0) {
+    return normalizeJsDocType(stripped, options);
   }
 
   const recordArgs = genericArguments(type, 'Object');

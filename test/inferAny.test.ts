@@ -15,12 +15,15 @@ const compilerOptions: ts.CompilerOptions = {
   noEmit: true,
 };
 
-function infer(source: string): { output: string; sites: readonly { inferred?: string; reason?: string }[] } {
+function infer(
+  source: string,
+  options: Parameters<typeof inferAnyInProject>[2] = {},
+): { output: string; sites: readonly { inferred?: string; reason?: string }[] } {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'infer-any-'));
   const file = path.join(directory, 'case.ts');
   fs.writeFileSync(file, source, 'utf8');
   try {
-    const [result] = inferAnyInProject([file], compilerOptions);
+    const [result] = inferAnyInProject([file], compilerOptions, options);
     assert.ok(result !== undefined);
     return { output: result.output, sites: result.sites };
   } finally {
@@ -35,7 +38,7 @@ let value: any;
 value = 42;
 takeNumber(value);
 `);
-  assert.match(output, /let value: number;/);
+  assert.match(output, /let value!?: number;/);
   assert.equal(sites.filter((site) => site.inferred === 'number').length, 1);
 });
 
@@ -104,7 +107,7 @@ v = u;
 v = booleanValue;
 declare const booleanValue: boolean;
 `);
-  const decl = output.match(/let v: \(?([^;]+?)\)?;/)?.[1] ?? '';
+  const decl = output.match(/let v!?: \(?([^;]+?)\)?;/)?.[1] ?? '';
   const members = decl.split(' | ').map((m) => m.trim());
   assert.deepEqual(members.sort(), ['boolean', 'number', 'string']);
 });
@@ -118,7 +121,7 @@ take(v);
 take2(v);
 `);
   // string is the only type accepted by both call sites (intersection).
-  assert.match(output, /let v: string;/);
+  assert.match(output, /let v!?: string;/);
 });
 
 test('parenthesizes a function type merged into a union', () => {
@@ -134,6 +137,32 @@ handler = 'later';
 test('ignores type assertions by default', () => {
   const { output } = infer(`const raw: unknown = 1;\nconst n = raw as any;\n`);
   assert.match(output, /raw as any/);
+});
+
+test('includeAssertions infers any inside as / angle-bracket assertions', () => {
+  const asCase = infer(`const a = 1 as any;\nconst b: number = a;\n`, { includeAssertions: true });
+  assert.match(asCase.output, /const a = 1 as number;/);
+  assert.ok(asCase.sites.some((s) => s.inferred === 'number'));
+  const angle = infer(`const a = <any>"hi";\nconst b: string = a;\n`, { includeAssertions: true });
+  assert.match(angle.output, /const a = <string>"hi";/);
+  // Unknown-typed expression has no evidence: keep any, do not fabricate.
+  const unknownCase = infer(`declare const u: unknown;\nconst a = u as any;\n`, { includeAssertions: true });
+  assert.match(unknownCase.output, /u as any/);
+});
+
+test('unassigned let keeps inference but gains a definite-assignment assertion', () => {
+  // Regression: narrowing `let v: any` to a concrete type makes tsc emit
+  // TS2454 (used before assigned). `let v!: T` keeps the inferred type and is
+  // strict-clean. Let declarations that are initialized or assigned, and
+  // ambient `declare var`, must NOT gain a `!`.
+  const r = infer(`function fmt(x: any) { if (typeof x === 'string') return 1; }\nlet v: any;\nfmt(v);\n`);
+  assert.match(r.output, /let v!: string;/);
+  const init = infer(`let v: any = "hi";\n`);
+  assert.match(init.output, /let v: string = "hi";/);
+  const assigned = infer(`let v: any;\nv = "hi";\n`);
+  assert.match(assigned.output, /let v: string;/);
+  const ambient = infer(`declare var module: any;\nmodule.exports = 1;\n`);
+  assert.doesNotMatch(ambient.output, /declare var module!:/);
 });
 
 test('parenthesizes inferred union types', () => {
@@ -242,7 +271,7 @@ test('does not treat read-only container accesses as element evidence', () => {
 
 test('nested any annotation still infers the whole type when not nested', () => {
   const { output } = infer(`let x: any = [1, 2];\n`);
-  assert.match(output, /let x: Array<number> = \[1, 2\];/);
+  assert.match(output, /let x!?: Array<number> = \[1, 2\];/);
 });
 
 test('propagates an inferred return type across file boundaries', () => {
@@ -286,7 +315,7 @@ function format(x: any) {
 let value: any;
 format(value);
 `);
-  assert.match(output, /let value: \(number \| string\);/);
+  assert.match(output, /let value!?: \(number \| string\);/);
 });
 
 test('back-propagation converges regardless of declaration order', () => {
@@ -298,7 +327,7 @@ function format(x: any) {
   if (typeof x === 'number') return 2;
 }
 `);
-  assert.match(output, /let value: \(number \| string\);/);
+  assert.match(output, /let value!?: \(number \| string\);/);
   assert.match(output, /function format\(x: \(number \| string\)\)/);
 });
 
@@ -312,7 +341,7 @@ let value: any;
 format(value);
 let copy: any = value;
 `);
-  assert.match(output, /let copy: \(number \| string\) = value;/);
+  assert.match(output, /let copy!?: \(number \| string\) = value;/);
 });
 
 test('multiple call-site constraints intersect with the inferred parameter type', () => {
@@ -326,7 +355,7 @@ let value: any;
 format(value);
 onlyString(value);
 `);
-  assert.match(output, /let value: string;/);
+  assert.match(output, /let value!?: string;/);
 });
 
 test('does not infer a parameter type when the body has no typeof narrowing', () => {
@@ -336,7 +365,7 @@ let value: any;
 identity(value);
 `);
   assert.match(output, /function identity\(x: any\)/);
-  assert.match(output, /let value: any;/);
+  assert.match(output, /let value!?: any;/);
 });
 
 test('back-propagates typeof narrowing across file boundaries', () => {
@@ -354,7 +383,7 @@ test('back-propagates typeof narrowing across file boundaries', () => {
     const producer = results.find((result) => result.fileName === a);
     const consumer = results.find((result) => result.fileName === b);
     assert.match(producer?.output ?? '', /function format\(x: \(number \| string\)\)/);
-    assert.match(consumer?.output ?? '', /let value: \(number \| string\);/);
+    assert.match(consumer?.output ?? '', /let value!?: \(number \| string\);/);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -377,7 +406,7 @@ function handle(x: any) {
 let value: any;
 handle(value);
 `);
-  assert.match(output, /let value: unknown\[\];/);
+  assert.match(output, /let value!?: unknown\[\];/);
 });
 
 test('infers an any parameter from instanceof narrowing (local class)', () => {
@@ -469,8 +498,8 @@ let value: any;
 handle(value);
 let copy: any = value;
 `);
-  assert.match(output, /let value: Foo;/);
-  assert.match(output, /let copy: Foo = value;/);
+  assert.match(output, /let value!?: Foo;/);
+  assert.match(output, /let copy!?: Foo = value;/);
 });
 
 test('unions typeof and instanceof narrowing into a parameter union', () => {
@@ -505,12 +534,12 @@ let value: any;
 handle(value);
 let copy: any = value;
 `);
-  assert.match(output, /let copy: Box = value;/);
+  assert.match(output, /let copy!?: Box = value;/);
 });
 
 test('infers an object shape with a callable method from a method call', () => {
   const { output } = infer(`let x: any; x.for(1);\n`);
-  assert.match(output, /let x: \{ for: \(\.\.\.args: unknown\[\]\) => unknown; \}/);
+  assert.match(output, /let x!?: \{ for: \(\.\.\.args: unknown\[\]\) => unknown; \}/);
   assert.doesNotMatch(output, /for: unknown/);
 });
 
@@ -528,7 +557,7 @@ test('does not downgrade a method signature to unknown when read first', () => {
 
 test('does not misclassify a plain property read as a method', () => {
   const { output } = infer(`let x: any; const v = x.name;\n`);
-  assert.match(output, /let x: \{ name: unknown; \}/);
+  assert.match(output, /let x!?: \{ name: unknown; \}/);
   assert.doesNotMatch(output, /name: \(/);
 });
 
@@ -538,7 +567,7 @@ function setup(x: any) { x.for(1); }
 let value: any;
 setup(value);
 `);
-  assert.match(output, /let value: \{ for: \(\.\.\.args: unknown\[\]\) => unknown; \}/);
+  assert.match(output, /let value!?: \{ for: \(\.\.\.args: unknown\[\]\) => unknown; \}/);
 });
 
 test('refines a method-shape parameter to a concrete type inferred at the call site', () => {
@@ -550,7 +579,7 @@ format(value);
   // value is inferred as number from its initializer in round 1; round 2
   // refines format's parameter from the weak { toFixed: fn } shape to number.
   assert.match(output, /function format\(x: number\)/);
-  assert.match(output, /let value: number = 42;/);
+  assert.match(output, /let value!?: number = 42;/);
 });
 
 test('refines a method-shape parameter from assignment evidence at the call site', () => {
@@ -561,7 +590,7 @@ value = 42;
 format(value);
 `);
   assert.match(output, /function format\(x: number\)/);
-  assert.match(output, /let value: number;/);
+  assert.match(output, /let value!?: number;/);
 });
 
 test('refines a method-shape parameter to a user class instance', () => {
@@ -582,7 +611,7 @@ format(value);
 let copy: any = value;
 `);
   assert.match(output, /function format\(x: number\)/);
-  assert.match(output, /let copy: number = value;/);
+  assert.match(output, /let copy!?: number = value;/);
 });
 
 test('narrows to the builtin type when the only method is lib-unique', () => {
@@ -669,7 +698,7 @@ isEmpty(value);
   assert.match(output, /Map<unknown, unknown>/);
   assert.match(output, /Set<unknown>/);
   assert.doesNotMatch(output, /<K|Set<T>|Map<K/);
-  assert.match(output, /let value:/);
+  assert.match(output, /let value!?:/);
 });
 
 test('infers object from an any passed to Object.defineProperty', () => {
@@ -677,15 +706,15 @@ test('infers object from an any passed to Object.defineProperty', () => {
 let x: any;
 Object.defineProperty(x, 'key', { value: 1 });
 `);
-  assert.match(output, /let x: object;/);
+  assert.match(output, /let x!?: object;/);
   assert.equal(sites.filter((site) => site.inferred === 'object').length, 1);
 });
 
 test('infers object from Object.defineProperties and Reflect.set', () => {
   const first = infer(`let x: any; Object.defineProperties(x, {});\n`).output;
-  assert.match(first, /let x: object;/);
+  assert.match(first, /let x!?: object;/);
   const second = infer(`let x: any; Reflect.set(x, 'k', 1);\n`).output;
-  assert.match(second, /let x: object;/);
+  assert.match(second, /let x!?: object;/);
 });
 
 test('back-propagates an Object.defineProperty object parameter to the call site', () => {
@@ -695,7 +724,7 @@ let value: any;
 setup(value);
 `);
   assert.match(output, /function setup\(x: object\)/);
-  assert.match(output, /let value: object;/);
+  assert.match(output, /let value!?: object;/);
 });
 
 test('keeps a concrete object initializer instead of the weaker object constraint', () => {
@@ -703,7 +732,7 @@ test('keeps a concrete object initializer instead of the weaker object constrain
 let x: any = { a: 1 };
 Object.defineProperty(x, 'b', { value: 2 });
 `);
-  assert.match(output, /let x: \{[^}]*a: number[^}]*\}/);
+  assert.match(output, /let x!?: \{[^}]*a: number[^}]*\}/);
 });
 
 test('still infers object for Object.keys whose lib signature is already object', () => {
@@ -711,7 +740,7 @@ test('still infers object for Object.keys whose lib signature is already object'
 let x: any;
 Object.keys(x);
 `);
-  assert.match(output, /let x: object;/);
+  assert.match(output, /let x!?: object;/);
 });
 
 test('leaves any untouched for an unrelated call named defineProperty', () => {
@@ -720,7 +749,7 @@ declare function defineProperty(o: any, k: string): void;
 let x: any;
 defineProperty(x, 'k');
 `);
-  assert.match(output, /let x: any;/);
+  assert.match(output, /let x!?: any;/);
 });
 
 test('keeps any when object and string constraints conflict', () => {
@@ -730,7 +759,7 @@ let x: any;
 Object.defineProperty(x, 'a', { value: 1 });
 takeString(x);
 `);
-  assert.match(output, /let x: any;/);
+  assert.match(output, /let x!?: any;/);
 });
 
 test('infers string from template interpolation, concatenation and strict comparison', () => {

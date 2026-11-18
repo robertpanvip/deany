@@ -275,6 +275,18 @@
 - **验证**：工作区本地 TS 升到 `6.0.3`（npm install 更新 lock）→ build/typecheck 通过、test **182/182 全绿**、CLI 守卫放行 TS6、真实转换 + d.ts 还原 + `--check` 全绿。新增回归测试 `checkStrict accepts Node globals emitted verbatim from JS`，反证：换回旧 check.ts 后该用例在 TS6 下精确变红、修复后转绿。
 - **诚实兜底**：无 JSDoc/无 d.ts 时 `add(a,b)` 推不出 → `unknown`，`unknown + unknown` 在 strict 下仍报 TS18046——这是「不臆测」原则的正确表现，非回归。
 
+## 社区 60 用例报告修复（本轮实现，5 问题全修）
+
+报告测 `@deany/core@0.1.5`（52 通过 / 8 失败 → 归并 5 问题）。在当前基线逐条复现，**5 项全部属实并全部修复**：
+
+- **P3（高）联合中 `function()` 未归一化→TS8020**：`(function():number)|string`、`(number|function():void)` 输出非法 TS。根因：`splitTopLevel` 遇括号不拆，`convertFunctionType` 的 `^function` 锚点拒绝开头的 `(`。修复：`src/normalize.ts` 加 `stripOuterParens`（仅首尾配对时剥离，不误伤 `(a)|(b)`），在 `convertFunctionType` 前剥离后递归。三种复现 + 括号语义保留均验证；类型匹配样例 `checkStrict` 通过。注意：报告样例 `return 1` 与返回类型联合不匹配报的 TS2322 是**正确类型检查**，非工具 bug（TS8020 非法语法已消除）。
+- **P4（高）`--assertions` 空开关**：开启后仅报告、不推断。根因：`ownerOf` 遇 `AsExpression`/`TypeAssertionExpression` 返回 undefined。修复：`inferAny.ts` 的 `visit` 里对断言位置的 any 单独处理——用 `checker.getTypeAtLocation(assertion.expression)` + `widenedTypeText` 取被断言表达式类型作为证据。不碰建表逻辑。实测 `1 as any→1 as number`、`<any>"hi"→<string>"hi"`、`changed:1/unresolved:0`、strict 通过；`unknown` 表达式无证据时保留 any（不臆造）；默认仍跳过。
+- **P1（中）README 导入路径**：两处 `from 'deany'` → `from '@deany/core'`。
+- **P5（中）收窄引入 TS2454**：`let v:any; fmt(v)` 推断具体类型后 tsc 报 used-before-assigned。**与项目核心卖点同源**（call-site 反推就靠这个写法），不可粗暴跳过推断（会毁掉 16 个反推测试）。修复：推断照常进行，但对「无 initializer + 从未被赋值 + 非 ambient」的 let 在变量名后补 definite-assignment assertion（`let v!: T`）——保留精确类型、消除 TS2454、strict 通过。排除 `declare var`（TS1255）与有初始化/赋值的声明。16 个既有反推测试断言改为 `/let v!?:/` 兼容可选 `!`。
+- **P2（低）无参崩溃**：`normalizeJsDocType(raw, options)` 的 options 加默认值 `DEFAULT_OPTIONS`。
+
+**验证**：新增 4 个回归测试（P2/P3 在 `normalize.test.ts`、P4/P5 在 `inferAny.test.ts`），全套 **186/186 全绿**，typecheck/build 通过。
+
 ## 待选库（尚未测试，供下一轮参考）
 
 预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。

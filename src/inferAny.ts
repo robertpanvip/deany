@@ -442,6 +442,75 @@ function referencesOf(symbol: ts.Symbol, ctx: InferenceContext): ts.Identifier[]
   return references;
 }
 
+/** Local equivalent of the assignment-operator check (kept independent of the
+ * compiler API export so it works across TS versions). */
+function isAssignmentOperatorKind(kind: ts.SyntaxKind): boolean {
+  return (
+    kind >= ts.SyntaxKind.FirstAssignment &&
+    kind <= ts.SyntaxKind.LastAssignment
+  );
+}
+
+/** True for `let`/`var x;` that has no initializer and is never assigned
+ * anywhere in the program. Replacing such an `any` with a concrete type makes
+ * TypeScript start definite-assignment analysis and emit TS2454 ("used before
+ * being assigned") at every read — an error the original `any` did not have.
+ * Keeping `any` here preserves the original strict-clean behaviour. */
+function isUnassignedLetWithoutInit(owner: ts.Node, ctx: InferenceContext): boolean {
+  if (!ts.isVariableDeclaration(owner) || owner.initializer !== undefined) {
+    return false;
+  }
+  const list = owner.parent;
+  if (!ts.isVariableDeclarationList(list)) {
+    return false;
+  }
+  // `const` declarations always have an initializer, so reaching here with no
+  // initializer means `let` or `var` (TS has no dedicated NodeFlags.Var).
+  if ((list.flags & ts.NodeFlags.Const) !== 0) {
+    return false;
+  }
+  // Ambient `declare var x;` cannot carry a definite-assignment assertion
+  // (TS1255), and is already assumed initialized by its declaration.
+  const statement = list.parent;
+  if (
+    statement !== undefined &&
+    ts.isVariableStatement(statement) &&
+    statement.modifiers?.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword)
+  ) {
+    return false;
+  }
+  const symbol = ctx.checker.getSymbolAtLocation(owner.name);
+  if (symbol === undefined) {
+    return true;
+  }
+  for (const ref of referencesOf(symbol, ctx)) {
+    if (ref === owner.name) {
+      continue;
+    }
+    const parent = ref.parent;
+    if (parent === undefined) {
+      continue;
+    }
+    // Any write to the binding means definite-assignment analysis would be
+    // satisfied after that point, so narrowing is safe.
+    if (
+      ts.isBinaryExpression(parent) &&
+      parent.left === ref &&
+      isAssignmentOperatorKind(parent.operatorToken.kind)
+    ) {
+      return false;
+    }
+    if (
+      (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) &&
+      (parent.operator === ts.SyntaxKind.PlusPlusToken ||
+        parent.operator === ts.SyntaxKind.MinusMinusToken)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** Call sites whose resolved signature belongs to `declaration` (cached). */
 function callsOf(
   declaration: ts.SignatureDeclaration,
@@ -2447,7 +2516,39 @@ export function inferAnyInProject(
       if (node.kind === ts.SyntaxKind.AnyKeyword) {
         const owner = ownerOf(node);
         if (owner === undefined) {
-          if (options.includeAssertions) {
+          // An `any` inside a type assertion (`1 as any`, `<any>x`) has no
+          // declaration owner. When --assertions is on, infer it from the type
+          // of the expression being asserted — that is the only real evidence
+          // available at this position. `1 as any` becomes `1 as number`, etc.
+          const assertion =
+            node.parent !== undefined &&
+            (ts.isAsExpression(node.parent) || ts.isTypeAssertionExpression(node.parent))
+              ? node.parent
+              : undefined;
+          const assertedType =
+            assertion !== undefined && options.includeAssertions
+              ? widenedTypeText(ctx.checker, ctx.checker.getTypeAtLocation(assertion.expression), assertion)
+              : undefined;
+          const usableAssertion =
+            assertedType !== undefined && assertedType !== 'any' && assertedType !== 'unknown'
+              ? assertedType
+              : undefined;
+          if (usableAssertion !== undefined) {
+            const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+            edits.push({
+              start: node.getStart(sourceFile),
+              end: node.end,
+              text: parenthesizeIfComposite(usableAssertion),
+            });
+            sites.push({
+              file: fileName,
+              line,
+              start: node.getStart(sourceFile),
+              end: node.end,
+              original: node.getText(sourceFile),
+              inferred: usableAssertion,
+            });
+          } else if (options.includeAssertions) {
             const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
             sites.push({
               file: fileName,
@@ -2484,6 +2585,22 @@ export function inferAnyInProject(
               end: node.end,
               text: parenthesizeIfComposite(usable),
             });
+            // `let v: any;` that is never initialized/assigned: narrowing to a
+            // concrete type would make TS start definite-assignment analysis
+            // and emit TS2454 at every read (the original `any` never did).
+            // A definite-assignment assertion (`let v!: T`) keeps the inferred
+            // type while telling TS the binding is intentionally assigned
+            // elsewhere — the only way to keep both precision and strict-
+            // legality without injecting a fake `undefined` into the type.
+            if (isUnassignedLetWithoutInit(owner, ctx) && ts.isVariableDeclaration(owner)) {
+              const nameEnd = owner.name.end;
+              const afterName = source.slice(nameEnd, nameEnd + 1);
+              // Only when the type annotation directly follows the name (i.e.
+              // `let v: any`), not a binding pattern or an existing `v!`.
+              if (afterName === ':') {
+                edits.push({ start: nameEnd, end: nameEnd, text: '!' });
+              }
+            }
             sites.push({ file: fileName, line, start: node.getStart(sourceFile), end: node.end, original, inferred: usable });
           } else if (options.reportAmbiguous) {
             const merged = mergeEvidence(collectEvidence(owner, ctx));

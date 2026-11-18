@@ -278,7 +278,7 @@ module.exports = { add, VERSION };
 ## 库用法
 
 ```ts
-import { convertSource, checkStrict, strictTsConfig } from 'deany';
+import { convertSource, checkStrict, strictTsConfig } from '@deany/core';
 
 const { output, diagnostics } = convertSource('a.js', source, {
   unknownForLoose: true,
@@ -292,7 +292,7 @@ if (!check.ok) {
 }
 
 // 反推已有 TS 里的 any
-import { inferAnyInProject, readCompilerOptions } from 'deany';
+import { inferAnyInProject, readCompilerOptions } from '@deany/core';
 const options = readCompilerOptions('tsconfig.json');
 const inferred = inferAnyInProject(['src/a.ts'], options);
 for (const file of inferred) {

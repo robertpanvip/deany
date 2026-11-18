@@ -101,3 +101,23 @@ test('TS built-in utility types are not emitted as dangling fallback aliases', (
   // A genuinely undefined capitalized type is still reported for fallback.
   assert.deepEqual(extractCustomTypeNames('Missing Foo', new Set(), new Set()).sort(), ['Foo', 'Missing']);
 });
+
+test('normalizeJsDocType defaults options when omitted', () => {
+  // Regression: the public export must not throw when called with one arg.
+  assert.equal(normalizeJsDocType('string'), 'string');
+  assert.equal(normalizeJsDocType('function():number'), '() => number');
+});
+
+test('normalizes JSDoc function types nested in unions and parens', () => {
+  // Regression (TS8020): raw `function(...)` leaking into a type annotation
+  // position is illegal TS. Every union/paren path must converge to arrows.
+  assert.equal(normalizeJsDocType('(function():number)|string', DEFAULT_OPTIONS), '(() => number) | string');
+  assert.equal(normalizeJsDocType('(number|function():void)', DEFAULT_OPTIONS), 'number | (() => void)');
+  assert.equal(
+    normalizeJsDocType('function(A):X|function(B):Y', DEFAULT_OPTIONS),
+    '((arg0: A) => X) | ((arg0: B) => Y)',
+  );
+  // Meaningful groupings must not be damaged.
+  assert.equal(normalizeJsDocType('(a)|(b)', DEFAULT_OPTIONS), 'a | b');
+  assert.equal(normalizeJsDocType('((number))', DEFAULT_OPTIONS), 'number');
+});
