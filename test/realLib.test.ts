@@ -395,7 +395,6 @@ function f(xs) {
   if (Array.isArray(xs)) {
     xs.forEach(function (item) { void item.a.b; });
   }
-  return xs;
 }
 `);
   assert.match(output, /xs: Array<\{ a: \{ b: unknown; \}; \}>/);

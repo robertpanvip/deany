@@ -61,6 +61,7 @@ node bin/jsdoc2ts.js infer-any app.ts -o app.inferred.ts --check
 | 调用点实参 | `takeNumber(count)` 且形参为 `number` → `number` |
 | 函数外部调用实参 | `greet(who: any)` + `greet('Ada')` → `string` |
 | 函数 `return` 语句 | `function f(): any { return 123 }` → `number` |
+| 函数无带值 `return` | `function f(): any { doWork() }` / `return;` → `void`（async 函数 → `Promise<void>`；生成器 / 构造器 / setter 不适用） |
 | 属性赋值 | `this.value = 'ok'` → `string` |
 | 属性访问集合 | `x.foo` / `x.bar` → 合成 `{ foo: T; bar: U }`（仅当无其他证据时）；方法调用 `x.for(1)` → 成员记为可调用签名 `(...args: unknown[]) => unknown` |
 | 内置 API 的对象槽位 | `Object.defineProperty(x, ...)` / `Reflect.set(x, ...)` 等要求对象的参数 → 逆变约束 `object`（`lib.d.ts` 把这些形参写成 `any`/`T`/`{}` 时也能反推；与更具体的来源共存时以来源为准） |
@@ -170,7 +171,7 @@ CLI：
 
 ## JS 里没有 JSDoc 的隐式 any
 
-JS 文件不需要写 JSDoc 也能推断：`jsdoc2ts` 默认会对**没有 JSDoc 类型**的声明，先用使用证据（赋值、调用点、算术运算、数组元素、`return` 等）反推类型，推不出来才回退 `unknown`。
+JS 文件不需要写 JSDoc 也能推断：`jsdoc2ts` 默认会对**没有 JSDoc 类型**的声明，先用使用证据（赋值、调用点、算术运算、数组元素、`return` 等）反推类型；函数体没有带值 `return` 时推断为 `void`（async 为 `Promise<void>`），只有其余推不出类型的声明才回退 `unknown`。
 
 ```bash
 node bin/jsdoc2ts.js examples/js-infer-input.js -o examples/js-infer-output.ts --check

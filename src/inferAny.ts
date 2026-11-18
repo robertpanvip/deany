@@ -1133,12 +1133,19 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
     }
   }
 
-  if (isFunctionLike(owner) && owner.body !== undefined) {
+  // A block-bodied function whose body contains no value-returning `return`
+  // always yields `undefined` at runtime, so its return type is precisely
+  // `void` — not a fallback `unknown`/`any`. Expression-bodied arrows are
+  // excluded here: their single expression is the implicit return value and
+  // is handled by the call-site / initializer evidence instead.
+  if (isFunctionLike(owner) && owner.body !== undefined && ts.isBlock(owner.body)) {
+    let hasValueReturn = false;
     const visit = (node: ts.Node): void => {
       if (isFunctionLike(node) && node !== owner) {
         return;
       }
       if (ts.isReturnStatement(node) && node.expression !== undefined) {
+        hasValueReturn = true;
         addSource(
           evidence,
           typeText(ctx, node.expression) ?? arithmeticNumberType(ctx, node.expression),
@@ -1147,6 +1154,14 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
       ts.forEachChild(node, visit);
     };
     visit(owner.body);
+    // Generators, constructors and setters cannot carry a `void` return
+    // annotation; leave them to their own evidence / the converter's skip list.
+    const isGenerator = 'asteriskToken' in owner && owner.asteriskToken !== undefined;
+    const cannotReturnVoid =
+      isGenerator || ts.isConstructorDeclaration(owner) || ts.isSetAccessorDeclaration(owner);
+    if (!hasValueReturn && !cannotReturnVoid) {
+      addSource(evidence, 'void');
+    }
   }
 
   const symbol = symbolOf(owner, ctx.checker);
@@ -1407,6 +1422,29 @@ function collectDeclarations(program: ts.Program): ts.Node[] {
   return owners;
 }
 
+/** True when `node` is the return-type annotation slot of a function-like owner. */
+function isReturnTypeAnnotationOf(node: ts.Node, owner: ts.Node): boolean {
+  return (
+    isFunctionLike(owner) &&
+    node.parent === owner &&
+    (owner as ts.SignatureDeclaration).type === node
+  );
+}
+
+/** Mirror the JS converter's async return wrapping on the explicit-`any` path:
+ * an async function returning `T` actually returns `Promise<T>` at runtime. */
+function wrapAsyncReturnForInfer(type: string, owner: ts.Node): string {
+  if (!isFunctionLike(owner)) {
+    return type;
+  }
+  const isAsync =
+    (ts.getCombinedModifierFlags(owner as ts.Declaration) & ts.ModifierFlags.Async) !== 0;
+  if (!isAsync || type.startsWith('Promise<')) {
+    return type;
+  }
+  return type === 'void' ? 'Promise<void>' : `Promise<${type}>`;
+}
+
 /** Store an owner's inferred type into the correct side of the table. */
 function setOwnerType(table: InferenceTable, owner: ts.Node, type: string): void {
   if (isFunctionLike(owner)) {
@@ -1520,7 +1558,10 @@ export function inferAnyInProject(
           const mutationKind = mutationKindOf(node);
           const mutationTypes =
             mutationKind === undefined ? [] : collectMutationEvidence(owner, mutationKind, ctx);
-          const usable = mergeMutationEvidence(usableProjected, mutationTypes);
+          let usable = mergeMutationEvidence(usableProjected, mutationTypes);
+          if (usable !== undefined && isReturnTypeAnnotationOf(node, owner)) {
+            usable = wrapAsyncReturnForInfer(usable, owner);
+          }
           if (usable !== undefined) {
             edits.push({
               start: node.getStart(sourceFile),

@@ -97,6 +97,19 @@ let alias = snapshot;
   assert.match(output, /let alias: number = snapshot;/);
 });
 
+test('annotates JS functions without a value return as void', () => {
+  const output = convertJs(`
+function noop() {}
+function bare() { return; }
+async function later() { await Promise.resolve(1); }
+function value() { return 42; }
+`);
+  assert.match(output, /function noop\(\): void/);
+  assert.match(output, /function bare\(\): void/);
+  assert.match(output, /async function later\(\): Promise<void>/);
+  assert.match(output, /function value\(\): number/);
+});
+
 test('infers an undocumented JS variable as object from Object.defineProperty', () => {
   const output = convertJs(`
 let config;

@@ -49,6 +49,24 @@ test('infers a function return type from return statements', () => {
   assert.match(output, /function load\(\): number/);
 });
 
+test('infers void for a function with no value-returning statement', () => {
+  const { output } = infer(`
+function noop(): any { const x = 1; }
+function bare(): any { return; }
+`);
+  assert.match(output, /function noop\(\): void/);
+  assert.match(output, /function bare\(\): void/);
+});
+
+test('wraps inferred returns in Promise for async functions', () => {
+  const { output } = infer(`
+async function noop(): any { await Promise.resolve(1); }
+async function value(): any { return 123; }
+`);
+  assert.match(output, /async function noop\(\): Promise<void>/);
+  assert.match(output, /async function value\(\): Promise<number>/);
+});
+
 test('infers a parameter type from external call sites', () => {
   const { output } = infer(`
 function greet(who: any): void {}
