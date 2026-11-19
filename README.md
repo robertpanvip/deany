@@ -177,6 +177,17 @@ const m: Map<string, any> = new Map(); m.set('a', 42); m.set('b', 'x'); // → M
 const s: Set<any> = new Set(); s.add(1); s.add('x');      // → Set<number | string>
 ```
 
+**无注解容器**：`new Map()` / `new Set()` 即使没有任何 `: any` 注解，也会从 `set(k, v)` / `add(v)` 反推出完整泛型参数，并且读取方法跟着收窄（同样来自调用点证据，非按方法名臆测）：
+
+```ts
+const m = new Map();          // → Map<string, number>
+m.set('k', 1);
+const v = m.get('k');         // → number | undefined（从 receiver 的推断泛型反推）
+const s = new Set(); s.add(1); s.add('x');  // → Set<number | string>
+```
+
+没有写入证据时仍退化为 `Map<unknown, unknown>` / `Set<unknown>`（比 `any` 安全，不污染下游）。显式写了类型参数（`new Map<string, number>()`）时以用户声明为准，不被反推覆盖。
+
 这里选**联合类型**而非元组：`push`/`set`/`add` 是运行时动态追加，元组（固定长度与位置）无法容纳后续写入，联合才是与 TypeScript 原生推断一致、且对 ScriptC 友好的表示。
 
 不嵌套的 `any` 仍按整个类型推断（`let x: any = [1,2]` → `Array<number>`）；函数返回类型 `Promise<any>` + `return 1` → `Promise<number>`，均不受影响。
@@ -278,13 +289,20 @@ module.exports = { add, VERSION };
 ## 库用法
 
 ```ts
-import { convertSource, checkStrict, strictTsConfig } from '@deany/core';
+import {
+  convertSource, checkStrict, strictTsConfig,
+  createUsageResolver, readCompilerOptions,
+} from '@deany/core';
 
+// 使用证据推断（赋值 / 调用点 / 算术 / 数组与容器变异等）依赖 resolver。
+// 用与目标文件一致的 compilerOptions 创建，并作为 convertSource 的第 4 个参数传入。
+const options = readCompilerOptions('tsconfig.json'); // 或你自己的 ts.CompilerOptions
+const resolver = createUsageResolver(['a.js'], options);
 const { output, diagnostics } = convertSource('a.js', source, {
   unknownForLoose: true,
   annotateUntyped: true,
   emitTypedefs: true,
-});
+}, resolver);
 
 const check = checkStrict('a.ts', output);
 if (!check.ok) {
@@ -292,8 +310,7 @@ if (!check.ok) {
 }
 
 // 反推已有 TS 里的 any
-import { inferAnyInProject, readCompilerOptions } from '@deany/core';
-const options = readCompilerOptions('tsconfig.json');
+import { inferAnyInProject } from '@deany/core';
 const inferred = inferAnyInProject(['src/a.ts'], options);
 for (const file of inferred) {
   for (const site of file.sites) {
@@ -301,6 +318,8 @@ for (const file of inferred) {
   }
 }
 ```
+
+> **易踩点：`convertSource` 必须传 `resolver` 才做使用证据推断。** `convertSource(fileName, source, options, resolver?)` 的第 4 个参数是可选的，但**省略它时所有基于使用证据的推断全部关闭**——无 JSDoc 的声明一律退化为 `unknown`（或 `options.defaultType`），赋值反推、调用点反推、算术运算、数组/Map/Set 容器变异、收窄反推等都不会发生，只剩 JSDoc 与字面量注解在起作用。CLI（`deany`）会自动构建 resolver，所以命令行用户不受影响；直接调用库 API 时务必用 `createUsageResolver([...files], compilerOptions)` 创建并传入，且 `compilerOptions` 应与目标项目一致（至少 `allowJs`、`strict`、`target`、`moduleResolution`）。若确实只想要“JSDoc → TS”的字面转换、不要使用证据推断，可以不传，此时退化到 `unknown` 是预期行为。
 
 ## 支持的 JSDoc
 

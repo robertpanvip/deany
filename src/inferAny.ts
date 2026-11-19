@@ -480,7 +480,7 @@ interface InferenceContext {
   readonly program: ts.Program;
   readonly table: InferenceTable;
   readonly referenceCache: Map<ts.Symbol, ts.Identifier[]>;
-  readonly callCache: Map<ts.SignatureDeclaration, ts.CallExpression[]>;
+  readonly callCache: Map<ts.SignatureDeclaration, CallSite[]>;
 }
 
 function createContext(
@@ -543,9 +543,6 @@ function builtinCallResultFromReceiver(ctx: InferenceContext, node: ts.Node): st
   const method = node.expression.name.text;
   const builtinReturn = BUILTIN_METHOD_RETURN.get(method);
   const arrayReturn = ARRAY_SCALAR_RETURN.get(method);
-  if (builtinReturn === undefined && arrayReturn === undefined) {
-    return undefined;
-  }
   // The receiver must already be inferred as a concrete type — never guess
   // from the method name alone. resolveViaTable reads the table entry for an
   // identifier/property-access receiver.
@@ -554,6 +551,28 @@ function builtinCallResultFromReceiver(ctx: InferenceContext, node: ts.Node): st
     return undefined;
   }
   const normalized = receiverType.trim();
+  // Container accessors whose result depends on the receiver's own inferred
+  // type arguments. e.g. `new Map()` recovered as `Map<string, number>` makes
+  // `m.get(k)` return `number | undefined` even though checkJs types an
+  // unannotated `new Map()` as `Map<any, any>`. This is receiver-driven, not a
+  // method-name guess: the receiver type must already be concrete.
+  const typeArgs = splitTypeArguments(normalized);
+  if (typeArgs !== undefined && /^(Readonly)?Map$/.test(normalized.slice(0, normalized.indexOf('<')))) {
+    if (method === 'get') {
+      return `${typeArgs[1] ?? 'unknown'} | undefined`;
+    }
+    if (method === 'has' || method === 'delete' || method === 'clear') {
+      return method === 'clear' ? 'void' : 'boolean';
+    }
+  }
+  if (typeArgs !== undefined && /^(Readonly)?Set$/.test(normalized.slice(0, normalized.indexOf('<')))) {
+    if (method === 'has' || method === 'delete' || method === 'clear') {
+      return method === 'clear' ? 'void' : 'boolean';
+    }
+  }
+  if (builtinReturn === undefined && arrayReturn === undefined) {
+    return undefined;
+  }
   const matchesFamily = UNIQUE_BUILTIN_METHODS.some(
     (family) => normalized === family.type && family.methods.has(method),
   );
@@ -751,19 +770,28 @@ function isUnassignedLetWithoutInit(owner: ts.Node, ctx: InferenceContext): bool
   return true;
 }
 
+/**
+ * A call to a function/method (`f(x)`) or a constructor invocation
+ * (`new C(x)`). Both carry positional `arguments` whose resolved signature
+ * declaration is the target function/constructor, so both are valid call-site
+ * evidence for parameter inference. Constructors are included so `new C(1)`
+ * can refine C's constructor parameters just like `c.m(1)` refines a method.
+ */
+type CallSite = ts.CallExpression | ts.NewExpression;
+
 /** Call sites whose resolved signature belongs to `declaration` (cached). */
 function callsOf(
   declaration: ts.SignatureDeclaration,
   ctx: InferenceContext,
-): ts.CallExpression[] {
+): CallSite[] {
   const cached = ctx.callCache.get(declaration);
   if (cached !== undefined) {
     return cached;
   }
-  const calls: ts.CallExpression[] = [];
+  const calls: CallSite[] = [];
   for (const sourceFile of nonDeclarationFiles(ctx.program)) {
     const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node)) {
+      if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
         const signature = ctx.checker.getResolvedSignature(node);
         if (signature?.declaration === declaration) {
           calls.push(node);
@@ -1355,6 +1383,21 @@ const BITWISE_OPERATORS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.GreaterThanGreaterThanGreaterThanToken,
 ]);
 
+/**
+ * Operators that coerce both operands to a number in JavaScript and can never
+ * concatenate (`+` is deliberately excluded — `'a' + b` is string concat).
+ * `'a' - b` yields NaN, but the operand is still numerically coerced, so an
+ * operand observed here is soundly `number` (matching the bitwise-operator
+ * treatment). `bigint` operands remain legal via their own checked source.
+ */
+const NUMERIC_COERCION_OPERATORS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.MinusToken,
+  ts.SyntaxKind.AsteriskToken,
+  ts.SyntaxKind.SlashToken,
+  ts.SyntaxKind.PercentToken,
+  ts.SyntaxKind.AsteriskAsteriskToken,
+]);
+
 /** Relational operators only accept orderable primitives (number/string). */
 const RELATIONAL_OPERATORS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.LessThanToken,
@@ -1866,6 +1909,13 @@ function constraintsFromReference(
     (parent.left === reference || parent.right === reference)
   ) {
     addSource(evidence, arithmeticNumberType(ctx, parent));
+    // `-`, `*`, `/`, `%`, `**` coerce both operands to number in JS and never
+    // concatenate, so an operand seen here is definitely numeric. `+` is
+    // excluded (it may be string concatenation), which is why it is handled
+    // by `arithmeticNumberType` only when the other side is already number.
+    if (NUMERIC_COERCION_OPERATORS.has(parent.operatorToken.kind)) {
+      addSource(evidence, 'number');
+    }
     // Any bitwise operator coerces both operands to int32, so an operand seen
     // in `x | 0`, `x & y`, `x << 2` etc. is definitely numeric.
     if (BITWISE_OPERATORS.has(parent.operatorToken.kind)) {
@@ -2124,6 +2174,68 @@ function collectMutationEvidence(
   return collected;
 }
 
+/**
+ * Recover concrete type arguments for `new Map()` / `new Set()` that were
+ * written without explicit generics (so the checker reports `Map<any, any>`).
+ * `set(k, v)` / `add(v)` calls through the binding are covariant evidence for
+ * the key and value slots, exactly as `push` is for arrays. Returns a fully
+ * instantiated `Map<K, V>` / `Set<V>` string, or undefined when there is no
+ * informative mutation evidence (the caller then keeps the safe normalized
+ * `Map<unknown, unknown>` / `Set<unknown>`).
+ */
+function containerInstantiationFromMutations(
+  owner: ts.Node,
+  kind: 'map' | 'set',
+  ctx: InferenceContext,
+): string | undefined {
+  const symbol = symbolOf(owner, ctx.checker);
+  if (symbol === undefined) {
+    return undefined;
+  }
+  const keys: string[] = [];
+  const values: string[] = [];
+  const record = (node: ts.Expression | undefined, bucket: string[]): void => {
+    if (node === undefined) {
+      return;
+    }
+    const text = typeText(ctx, node);
+    bucket.push(text ?? 'unknown');
+  };
+  for (const ref of referencesOf(symbol, ctx)) {
+    const parent = ref.parent;
+    if (!ts.isPropertyAccessExpression(parent) || parent.expression !== ref) {
+      continue;
+    }
+    const call = parent.parent;
+    if (!ts.isCallExpression(call) || call.expression !== parent) {
+      continue;
+    }
+    const method = parent.name.text;
+    if (kind === 'map' && method === 'set' && call.arguments.length >= 2) {
+      record(call.arguments[0], keys);
+      record(call.arguments[1], values);
+    } else if (kind === 'set' && method === 'add' && call.arguments.length >= 1) {
+      record(call.arguments[0], values);
+    }
+  }
+  if (kind === 'map') {
+    if (keys.length === 0 || values.length === 0) {
+      return undefined;
+    }
+    const k = mergeMutationEvidence(undefined, keys);
+    const v = mergeMutationEvidence(undefined, values);
+    if (k === undefined || v === undefined) {
+      return undefined;
+    }
+    return `Map<${k}, ${v}>`;
+  }
+  if (values.length === 0) {
+    return undefined;
+  }
+  const v = mergeMutationEvidence(undefined, values);
+  return v === undefined ? undefined : `Set<${v}>`;
+}
+
 /** Collect type evidence for the declaration that owns an `any` annotation. */
 function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
   const evidence = emptyEvidence();
@@ -2231,13 +2343,32 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
         // genuinely unknown, so normalize them. Only do this when the source
         // has no explicit type arguments (`new Map<string, n>()` is the user's
         // declared choice and must be kept).
-        if (
-          ts.isNewExpression(init) &&
-          init.typeArguments === undefined &&
-          initializerType !== undefined &&
-          /\bany\b/.test(initializerType)
-        ) {
-          initializerType = initializerType.replace(/\bany\b/g, 'unknown');
+        if (ts.isNewExpression(init) && init.typeArguments === undefined) {
+          // `new Map()` / `new Set()` without explicit generics: prefer a
+          // concrete instantiation recovered from `set(k, v)` / `add(v)`
+          // mutations (the same covariant evidence used for arrays). Only
+          // accept it when the checker's own type was an opaque `any` slot —
+          // a non-any initializer type must not be overridden by a guess.
+          const ctorText = init.expression.getText();
+          const containerKind: 'map' | 'set' | undefined =
+            /^(Readonly)?Map$/.test(ctorText)
+              ? 'map'
+              : /^(Readonly)?Set$/.test(ctorText)
+                ? 'set'
+                : undefined;
+          let instantiated: string | undefined;
+          if (
+            containerKind !== undefined &&
+            initializerType !== undefined &&
+            /\bany\b/.test(initializerType)
+          ) {
+            instantiated = containerInstantiationFromMutations(owner, containerKind, ctx);
+          }
+          if (instantiated !== undefined) {
+            initializerType = instantiated;
+          } else if (initializerType !== undefined && /\bany\b/.test(initializerType)) {
+            initializerType = initializerType.replace(/\bany\b/g, 'unknown');
+          }
         }
         const bindingName = ts.isIdentifier(owner.name) ? owner.name.text : undefined;
         if (
@@ -2293,7 +2424,7 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
     const functionNode = owner.parent;
     const index = functionNode.parameters.indexOf(owner);
     for (const call of callsOf(functionNode, ctx)) {
-      const argument = call.arguments[index];
+      const argument = call.arguments?.[index];
       if (argument !== undefined) {
         // An unannotated callback argument (`apply(s => s.length, 'x')`) has
         // no useful checker type — its params are implicit `any`, so typeText

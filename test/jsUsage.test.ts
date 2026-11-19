@@ -117,3 +117,72 @@ Object.defineProperty(config, 'key', { value: 1 });
 `);
   assert.match(output, /let config: object;/);
 });
+
+// --- 2.1: map/set generic inference from mutations (no annotation, no JSDoc) ---
+test('infers new Map() generics from set(key, value) mutations', () => {
+  const output = convertJs(`
+const m = new Map();
+m.set('k', 1);
+const v = m.get('k');
+`);
+  assert.match(output, /const m: Map<string, number> = new Map\(\);/);
+  assert.match(output, /const v: number \| undefined = m\.get\('k'\);/);
+});
+
+test('infers new Set() element type from add(value) mutations', () => {
+  const output = convertJs(`
+const s = new Set();
+s.add(1);
+s.add('x');
+`);
+  assert.match(output, /const s: Set<\(?number \| string\)?> = new Set\(\);/);
+});
+
+test('infers map generics when set() arguments are themselves inferred calls', () => {
+  const output = convertJs(`
+const m = new Map();
+m.set(makeKey(), makeValue());
+function makeKey() { return 'k'; }
+function makeValue() { return 1; }
+`);
+  // set() arguments are real calls with inferred types, so this should still
+  // resolve to concrete slots rather than falling back to unknown.
+  assert.match(output, /const m: Map<string, number> = new Map\(\);/);
+});
+
+// --- 2.2: constructor parameters inferred from new-expression call sites ---
+test('infers undocumented constructor parameters and promoted fields from new Point(1, 2)', () => {
+  const output = convertJs(`
+class Point { constructor(x, y) { this.x = x; this.y = y; } }
+const p = new Point(1, 2);
+`);
+  assert.match(output, /constructor\(x: number, y: number\)/);
+  assert.match(output, /x!: number;/);
+  assert.match(output, /y!: number;/);
+});
+
+test('constructor parameters respect mismatched call-site argument types', () => {
+  const output = convertJs(`
+class Box { constructor(value) { this.value = value; } }
+new Box('text');
+`);
+  assert.match(output, /constructor\(value: string\)/);
+  assert.match(output, /value!: string;/);
+});
+
+// --- 2.4: purely numeric operators infer number operands; + stays conservative ---
+test('infers number operands from minus and divide without a call site', () => {
+  const output = convertJs(`
+function sub(a, b) { return a - b; }
+function div(a, b) { return a / b; }
+`);
+  assert.match(output, /function sub\(a: number, b: number\): number/);
+  assert.match(output, /function div\(a: number, b: number\): number/);
+});
+
+test('does not infer number operands from + (may be string concatenation)', () => {
+  const output = convertJs(`
+function add(a, b) { return a + b; }
+`);
+  assert.match(output, /function add\(a: unknown, b: unknown\): unknown/);
+});

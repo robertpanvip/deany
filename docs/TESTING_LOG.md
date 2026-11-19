@@ -330,8 +330,54 @@
 2. **结构化槽位投影替换字符串投影**：`projectSlotType` 靠解析打印出的类型字符串投影，遇类型参数含逗号（函数类型）会失败并双重包装——`const m: Map<string, any> = new Map<string, (a: number, b: string) => void>()` 曾输出 `Map<string, Map<string, ...>>` + TS2322。新增 `structuredSlotType`，用 checker 对初始化器的 `getTypeArguments`/数组索引类型沿槽位路径结构化投影，优先于字符串投影；过滤改用 widened flags（避免函数返回 `void` 字样被文本正则误杀）。修复后输出 `Map<string, (a: number, b: string) => void>`，strict 1→0。tuple 括号场景（ `[any, any]` ）属数组字面量元素推断、非投影范畴，未触及。
 3. **内建返回的确定兜底**：实测确认 checker 对 `Object.keys/values/entries`、`Array.map`、`JSON` 等在可自然触发场景都直接给出正确返回类型，`BUILTIN_METHOD_RETURN` 与 `UNIQUE_BUILTIN_METHODS` 无缺口——补这些条目属死代码，按"不写无效代码"原则未加。找到并修复真实缺口：`join`/`toString` 返回 `string` 与元素类型无关，但当 checker 把链式调用（`mk().join(',')`，receiver opaque）判为 any 时拿不到。新增 `ARRAY_SCALAR_RETURN`，在 `builtinCallResultFromReceiver` 中当 receiver 的推断类型被独立确证为数组时返回确定类型（非按方法名臆测）。`const s: any = mk().join(',')` 由 any → `string`。
 
+## 定时压测第 38~41 轮（会话内连跑 · 基于 0.1.11 最新代码）
+
+昨晚循环断在第 37 轮（沙箱休眠），本次在主会话内**同步连跑**第 38~41 轮避开休眠，全部基于当前 HEAD `10c3567`。四轮合计抽到：define-properties / pWait / normalize-path / is-arrayish / is-callable / p-waterfall / is-boolean-object / p-series / fill-range。**无新缺陷**，逐项归类：
+
+| 库（轮次） | 诊断变化 | 归类 |
+| --- | --- | --- |
+| define-properties（38） | 8→6 | 余项 TS2307×2（缺 `object-inspect`/`define-data-property` 依赖）、TS7053 动态下标、TS2345/TS18046 回调谓词 unknown —— 缺依赖级联 + 动态性，历轮已判定 |
+| pWait（38） | DOWNLOAD_FAILED | 网络/包名问题，如实跳过 |
+| normalize-path（38/39/41） | 2→1 | 余 1 条 TS2322 `string\|undefined` 字符串索引，原 JS 在 checkJs 下同型，已知边界 |
+| is-arrayish（39/41） | 1→4 | TS2339×4 on `never`，纯 duck-typing 库，任何安全注解都无法归零，已判固有限制不修 |
+| is-callable（39） | 20→15 | 余 TS2584/TS2304（缺 DOM lib：`document`/`HTMLAllCollection`）、TS2345/TS2349/TS2554（动态调用/反射）—— 环境缺失 + 动态性，非单点可修 |
+| p-waterfall（40） | 5→1 | 余 TS2307 缺 `p-reduce` 依赖，级联 |
+| is-boolean-object（40） | 2→2 | TS2307/TS2306 缺 `call-bound` 依赖，级联 |
+| p-series（40） | 1→1 | TS18046 `task` unknown（回调闭包参数），历轮已判 |
+| fill-range（41） | 57→35 | TS2345×18 动态参数、TS2339×9 反射访问，历轮已判非单点可修 |
+
+**关键发现：候选池已榨干**。`已测过滤后候选数` 恒定 20，但四轮里 normalize-path/is-arrayish/fill-range/is-boolean-object 被反复抽到——因为 `MANUAL_TESTED`/日志正则只覆盖部分包名，未测与已测库混在同 20 个池子里反复出现。继续跑只会重复这些库，发现新缺陷的概率极低。**下一步应先扩充候选池**（`random_probe.ts` 的 `POOL` / `MANUAL_TESTED`）再跑，否则边际收益趋近于零。代码侧本轮无需改动，196/196 仍全绿。
+
+## 定时压测第 42~44 轮（扩充候选池后 · 发现新库）
+
+因 38~41 轮候选池枯竭（反复抽同几库），先给 `random_probe.ts` 的 `POOL` 补充 22 个新的小型纯 JS 库、并把 21~41 轮已充分归类的库补进 `MANUAL_TESTED` 去重，再续跑。新库成功被抽到，归类如下：
+
+| 库（轮次） | 诊断变化 | 归类 |
+| --- | --- | --- |
+| dot-prop（42） | 40→22 | 大幅改善；余项 TS7053×7（`parent[key]` 动态下标）、TS2345×5（动态路径参数）、TS2322×4 等，全是动态属性访问，无可靠类型信息，历轮已判 |
+| p-whilst（42） | 4→1 | 余 TS2345 `unknown` 传入回调，动态性 |
+| snake-case（42） | 2→2 | TS2307×2 缺 `tslib`/`dot-case` 依赖，级联 |
+| clone（43/44） | 50→53 | **唯一诊断上涨，已 dump 逐条确认**：净增 3 条是 `depth = circular.depth` 类 unknown→`number\|undefined` 赋值（54/55/57 行）。原 JS 中 `circular` 为隐式 any 不报错，转显式 unknown 后触发 TS2322——**去 any 化的必然代价，非推断错误**。库靠 `Object.keys` + constructor 反射做深拷贝，全 53 条同类，无可靠类型信息。归类固有限制不修（修需引入"赋值约束跨属性传播"，影响面过大、易回归） |
+| p-all（43/44） | 4→1 | TS2307 缺 `p-map` 依赖，级联 |
+| is-object（43） | 1→0 | 清零 |
+| safe-buffer（44） | 13→9 | 改善；余 TS2339×4（`Buffer.from/alloc` 缺 Node 类型上下文）、TS7053 动态下标等，环境/动态性 |
+
+**结论**：本轮 7 轮（38~44）共 21 个库样本，**无新的可修真实缺陷**。扩充候选池后已能持续抽到新库，去重清单同步更新（新测库已补入 `MANUAL_TESTED`）。代码无需改动，196/196 仍全绿、typecheck 干净。
+
 ## 待选库（尚未测试，供下一轮参考）
 
-预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。
+预留候选：`visionmedia/bytes` src 源码目录、`jshttp/ms`、`sindresorhus/p-finally`、`component/emitter`、`feross/standard` 依赖链小库。扩充时优先加入这些，并把本轮反复出现的库（normalize-path/is-arrayish/fill-range）补进 `MANUAL_TESTED` 去重。
 
 > 拉取失败或网络不可用时如实记录并跳过，不要伪造结果。每轮聚焦一个真实缺陷做扎实，不追求诊断数清零——`unknown`/`void` 是保守设计的正确兜底。
+
+## 用户缺陷清单 2.x 三项修复（@deany/core 0.1.12）
+
+用户对 0.1.5 报告的 2.1/2.2/2.3/2.4 四项，逐条复现后：2.3（递归）与 2.4 的 `+`（可能字符串拼接）维持固有边界不修；其余三项全部修复，均经最小复现确认 + checkJs:false/true 双验证 + strict 诊断清零。全套 **203/203 全绿**（196→203，新增 7 项回归），typecheck/build 通过。
+
+- **2.1 Map/Set 无注解泛型反推（新能力）**：`const m = new Map(); m.set('k',1); const v = m.get('k')` 原输出 `Map<unknown,unknown>` + `v: unknown`。根因：`collectMutationEvidence` 虽已支持 `map`/`set` 变异收集，但只在**显式 `: any` 槽位投影**路径用到；`new Map()` 无注解场景只做 `any→unknown` 替换，从不收集 `set/add`。修复分两步：① 新增 `containerInstantiationFromMutations`，对 `new Map()/new Set()` 无类型参数且 checker 报 `Map<any,any>` 的 owner，收集 `set(k,v)` 的 key/value、`add(v)` 的 value 合成 `Map<K,V>`/`Set<V>`（协变证据，与数组 push 同源）；② 扩展 `builtinCallResultFromReceiver`，当 receiver 的**推断表类型**已是具体 `Map<K,V>` 时，`get→V|undefined`、`has/delete→boolean`、`clear→void`（receiver 驱动，非按方法名臆测）。结果 `m: Map<string,number>`、`v: number|undefined`，strict 0。无写入证据仍退化 `Map<unknown,unknown>`；显式 `new Map<string, number>()` 不受影响。调试中发现并修正一处正则笔误（`Map$<` → `Map$`）。
+- **2.2 构造器参数纳入调用点反推**：`class Point { constructor(x,y){...} } new Point(1,2)` 原输出 `x: unknown; y: unknown` + TS2339×2（字段未提升），而普通方法参数 `c.m(1)` 早已能从调用点反推。根因：`callsOf` 只收集 `ts.CallExpression`，`new Point()` 是 `ts.NewExpression`，构造器签名永远匹配不到调用点。修复：新增 `CallSite = CallExpression | NewExpression`，`callsOf` 同时收集两者的 resolved signature（`getResolvedSignature` 对 new 返回构造器声明），参数分支用 `call.arguments?.[index]`（NewExpression.arguments 可选）。结果 `constructor(x:number,y:number)` + `x!/y!: number` 字段提升，strict 0；普通方法反推不受影响。`this.x = x` 字段类型来自参数已被反推后的 `resolver.typeOf`。
+- **2.4 纯数值运算符操作数推 number**：`function sub(a,b){return a-b}` 原 `a/b: unknown` + TS18046×2。根因：`arithmeticNumberType` 只在另一侧已是 number 时才推 number，无证据的 `-` 推不出；位运算则无条件 `addSource('number')`。修复：新增 `NUMERIC_COERCION_OPERATORS = {-,*,/,%,**}`（刻意排除 `+`），操作数与位运算一样无条件收 number 证据（JS 语义下必然数值强转，`'a'-'b'` 得 NaN 但操作数仍被数值化）。结果 `sub/div: a:number,b:number`，strict 0；`+` 仍保守推 unknown（可能字符串拼接），不被污染。有 bigint 具体来源时不被覆盖。
+
+**2.3（递归）/ 2.4 的 `+`**：与 0.1.2 一致，属正确取舍。引擎只向前迭代、不假设函数自身签名，递归自调用不构成返回值证据；`+` 无证据时可能是字符串拼接，保持 unknown 是"不臆测"的正确表现。
+
+**文档**：README 补 `convertSource(fileName, source, options, resolver?)` 的醒目说明——第 4 个 resolver 省略时所有使用证据推断（赋值/调用点/算术/容器变异/收窄）全部关闭，无 JSDoc 声明一律退化 `unknown`（CLI 自动构建 resolver 不受影响）；示例改为正确传 `createUsageResolver`。容器变异章节补无注解 Map/Set 反推样例。
