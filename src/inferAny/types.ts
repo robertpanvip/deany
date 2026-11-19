@@ -1,5 +1,7 @@
 import * as ts from 'typescript';
 
+import type { DeclarationProvider } from '../dts.js';
+
 export interface InferAnyOptions {
   /** Report ambiguous sites instead of silently leaving them untouched. */
   readonly reportAmbiguous: boolean;
@@ -61,6 +63,18 @@ export interface InferenceContext {
   readonly table: InferenceTable;
   readonly referenceCache: Map<ts.Symbol, ts.Identifier[]>;
   readonly callCache: Map<ts.SignatureDeclaration, CallSite[]>;
+  /**
+   * Authoritative sibling `.d.ts` contracts, keyed by the source file path.
+   * When a declaration has an entry here, its type outranks all usage
+   * evidence. Optional so the pure in-memory resolver path stays unchanged.
+   */
+  readonly dtsProviders?: ReadonlyMap<string, DeclarationProvider>;
+  /**
+   * When true, exported (public-API) parameters are not narrowed from internal
+   * call-site arguments (S4). Enabled only by the infer-any flow; the convert
+   * flow's usage resolver keeps its historic behaviour.
+   */
+  readonly narrowExportedParams?: boolean;
 }
 
 /**
@@ -98,6 +112,13 @@ export interface ShapeNode {
  */
 export interface Evidence {
   readonly sources: string[];
+  /**
+   * Low-confidence covariant sources. These come from call-site arguments of
+   * exported (public-API) parameters: internal usage is not a reliable contract
+   * for a value outside callers can supply. They never outrank `sources`, and
+   * when they are the only evidence the owner stays un-narrowed (`any`).
+   */
+  readonly weakSources: string[];
   readonly constraints: string[];
   readonly properties: Map<string, string>;
   readonly elementShape: ShapeNode;

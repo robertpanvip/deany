@@ -2,6 +2,9 @@ import * as ts from 'typescript';
 import * as path from 'node:path';
 
 import type { AnySite, InferAnyOptions, InferFileResult } from './types.js';
+import { findSiblingDts, parseDeclarationFile } from '../dts.js';
+import type { DeclarationProvider } from '../dts.js';
+import { declaredTypeOf } from './publicApi.js';
 import { DEFAULT_INFER_OPTIONS, createContext, createTable } from './state.js';
 import { buildInferenceTable, ownerType } from './table.js';
 import { collectAnyOwners, isReturnTypeAnnotationOf, isUnassignedLetWithoutInit, wrapAsyncReturnForInfer } from './collect.js';
@@ -23,7 +26,24 @@ export function inferAnyInProject(
   const options: InferAnyOptions = { ...DEFAULT_INFER_OPTIONS, ...optionsInput };
   const program = ts.createProgram([...rootNames], compilerOptions);
   const checker = program.getTypeChecker();
-  const ctx = createContext(checker, program, createTable());
+
+  // Load sibling `.d.ts` contracts for each root. A declared type is the
+  // highest-confidence evidence and outranks any usage inference (S4). The map
+  // is keyed by the resolved source-file path to match `owner.getSourceFile()`.
+  const dtsProviders = new Map<string, DeclarationProvider>();
+  for (const root of rootNames) {
+    const sourceFile = program.getSourceFile(root);
+    const key = sourceFile?.fileName ?? path.resolve(root);
+    const dtsPath = findSiblingDts(key);
+    if (dtsPath !== undefined) {
+      const provider = parseDeclarationFile(dtsPath);
+      dtsProviders.set(key, provider);
+      // Also register the resolved absolute path — infer paths can differ in
+      // casing/normalisation between the program key and the owner's file.
+      dtsProviders.set(path.resolve(root), provider);
+    }
+  }
+  const ctx = createContext(checker, program, createTable(), dtsProviders, true);
   buildInferenceTable(collectAnyOwners(program), ctx);
 
   const results: InferFileResult[] = [];
@@ -88,6 +108,12 @@ export function inferAnyInProject(
           const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
           const original = node.getText(sourceFile);
           const wholeType = ownerType(ctx.table, owner);
+          // A sibling `.d.ts` declaration is authoritative (S4). When present,
+          // its type — including bare `unknown` — is the contract and must not
+          // be dropped as "information-free" by mergeMutationEvidence below.
+          const dtsSource = ctx.dtsProviders?.get(sourceFile.fileName);
+          const hasDtsContract =
+            dtsSource !== undefined && declaredTypeOf(owner, dtsSource) !== undefined;
           // The owner's inferred type describes the whole value. Project it
           // onto the position this `any` token actually occupies so nested
           // slots (`any[]`, `Array<any>`, `Map<K, any>`) are not double-wrapped.
@@ -126,7 +152,11 @@ export function inferAnyInProject(
           // would leave the slot untyped, and the generic whole-type fallback
           // would be structurally illegal. Let it through when nothing better
           // was found via mutations.
-          if (usable === undefined && usableProjected === 'unknown' && special !== undefined) {
+          if (
+            usable === undefined &&
+            usableProjected === 'unknown' &&
+            (special !== undefined || hasDtsContract)
+          ) {
             usable = 'unknown';
           }
           if (usable !== undefined && isReturnTypeAnnotationOf(node, owner)) {

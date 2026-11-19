@@ -16,7 +16,7 @@ function getValue(): number {
   return 123;
 }
 
-function greet(who: string): void {}
+function greet(who: any): void {}
 greet('Ada');
 
 class Box {

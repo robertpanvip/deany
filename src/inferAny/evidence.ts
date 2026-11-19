@@ -2,7 +2,8 @@ import * as ts from 'typescript';
 
 import type { Evidence, InferenceContext } from './types.js';
 import { controlFlowNarrowedType } from './controlFlow.js';
-import { addConstraint, addSource, emptyEvidence } from './state.js';
+import { addConstraint, addSource, addWeakSource, emptyEvidence } from './state.js';
+import { declaredTypeOf, isExportedParameter } from './publicApi.js';
 import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES } from './constants.js';
 import { arrayElementTypeOf, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
 import { customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsOf } from './shape.js';
@@ -627,6 +628,20 @@ export function constraintsFromReference(
 export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
   const evidence = emptyEvidence();
 
+  // A sibling `.d.ts` is the authoritative contract. If this declaration is
+  // covered by one, its declared type is the highest-confidence evidence and
+  // short-circuits all usage inference — an internal call site must never
+  // narrow a value whose public type was already declared.
+  if (ctx.dtsProviders !== undefined) {
+    const sourceFile = owner.getSourceFile();
+    const provider = sourceFile === undefined ? undefined : ctx.dtsProviders.get(sourceFile.fileName);
+    const declared = declaredTypeOf(owner, provider);
+    if (declared !== undefined) {
+      addSource(evidence, declared);
+      return evidence;
+    }
+  }
+
   if (
     ts.isVariableDeclaration(owner) ||
     ts.isPropertyDeclaration(owner) ||
@@ -822,6 +837,12 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence
   if (ts.isParameter(owner) && isFunctionLike(owner.parent)) {
     const functionNode = owner.parent;
     const index = functionNode.parameters.indexOf(owner);
+    // S4: for an exported (public-API) parameter, internal call-site arguments
+    // are NOT a reliable contract — outside callers may supply any value. Route
+    // that evidence to `weakSources`, which never outranks real usage evidence
+    // and cannot by itself narrow the parameter. Non-exported parameters keep
+    // the original strong behaviour so internal inference is unaffected.
+    const weakCallSites = ctx.narrowExportedParams === true && isExportedParameter(owner, ctx.checker);
     for (const call of callsOf(functionNode, ctx)) {
       const argument = call.arguments?.[index];
       if (argument !== undefined) {
@@ -834,10 +855,11 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence
         // satisfies, instead of a generic `(...args: unknown[])` that cannot
         // accept a narrowed callback (TS2345).
         const callbackSig = opaqueCallbackSignature(argument, ctx);
-        if (callbackSig !== undefined) {
-          addSource(evidence, callbackSig);
+        const evidenceType = callbackSig ?? typeText(ctx, argument);
+        if (weakCallSites) {
+          addWeakSource(evidence, evidenceType);
         } else {
-          addSource(evidence, typeText(ctx, argument));
+          addSource(evidence, evidenceType);
         }
       }
     }

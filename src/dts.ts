@@ -40,13 +40,22 @@ export interface DeclarationProvider {
   readonly typeDeclarations: readonly DtsTypeDeclaration[];
 }
 
-/** Find a declaration file paired with `jsPath` (`lib.js` -> `lib.d.ts`). */
+/** Find a declaration file paired with a source path.
+ *  `lib.js` -> `lib.d.ts`; `api.ts` -> `api.d.ts` (the infer-any case).
+ *  A path that already ends in `.d.ts` returns itself. */
 export function findSiblingDts(jsPath: string): string | undefined {
   const absolute = path.resolve(jsPath);
-  if (!/\.js$/i.test(absolute)) {
+  if (/\.d\.ts$/i.test(absolute)) {
+    return fs.existsSync(absolute) ? absolute : undefined;
+  }
+  const candidate = /\.ts$/i.test(absolute)
+    ? absolute.replace(/\.ts$/i, '.d.ts')
+    : /\.js$/i.test(absolute)
+      ? absolute.replace(/\.js$/i, '.d.ts')
+      : undefined;
+  if (candidate === undefined) {
     return undefined;
   }
-  const candidate = absolute.replace(/\.js$/i, '.d.ts');
   return fs.existsSync(candidate) ? candidate : undefined;
 }
 
@@ -76,6 +85,11 @@ export function loadDeclarations(jsPath: string): DeclarationProvider | undefine
   if (dtsPath === undefined) {
     return undefined;
   }
+  return parseDeclarationFile(dtsPath);
+}
+
+/** Parse an explicit `.d.ts` path into a provider (shared by JS and TS paths). */
+export function parseDeclarationFile(dtsPath: string): DeclarationProvider {
   const text = fs.readFileSync(dtsPath, 'utf8');
   const sourceFile = ts.createSourceFile(
     dtsPath,

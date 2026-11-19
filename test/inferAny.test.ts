@@ -980,3 +980,107 @@ test('for-of element type is inferred from the loop body so the body type-checks
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
+
+// --- S4 regression: exported params must not be narrowed by internal calls ----
+
+test('S4: an exported function parameter is not narrowed by internal call sites', () => {
+  // The public contract must not be inferred from how the module happens to
+  // call itself. `process("hello")` internally must not turn `value: any` into
+  // `value: string` — external callers may pass any value.
+  const { output, sites } = infer(`
+export function process(value: any) { return String(value); }
+process('hello');
+process('world');
+`);
+  assert.match(output, /export function process\(value: any\)/);
+  assert.ok(sites.some((site) => site.original === 'any' && site.inferred === undefined));
+});
+
+test('S4: a non-exported parameter is still narrowed by call sites (unchanged)', () => {
+  const { output } = infer(`
+function helper(value: any) { return String(value); }
+helper('hello');
+`);
+  assert.match(output, /function helper\(value: string\)/);
+});
+
+test('S4: genuine guard evidence still narrows an exported parameter', () => {
+  // Lowering call-site confidence must not discard strong evidence from the
+  // function body itself (typeof/instanceof narrowing).
+  const { output } = infer(`
+export function format(x: any) { if (typeof x === 'string') return 1; if (typeof x === 'number') return 2; }
+`);
+  assert.match(output, /export function format\(x: \(number \| string\)\)/);
+});
+
+test('S4: a sibling .d.ts contract outranks call-site inference (including unknown)', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 's4-dts-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(api, `export function process(value: any) { return value.toString(); }\nprocess('hello');\n`, 'utf8');
+  fs.writeFileSync(dts, `export declare function process(value: unknown): string;\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const producer = results.find((result) => result.fileName === api);
+    assert.match(producer?.output ?? '', /export function process\(value: unknown\)/);
+    assert.ok(producer?.sites.some((site) => site.inferred === 'unknown'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('S4: a sibling .d.ts restores a concrete parameter type over usage inference', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 's4-dts2-'));
+  const mod = path.join(directory, 'mod.ts');
+  const dts = path.join(directory, 'mod.d.ts');
+  fs.writeFileSync(mod, `export const count: any = 1;\n`, 'utf8');
+  fs.writeFileSync(dts, `export declare const count: number;\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([mod, dts], compilerOptions);
+    const producer = results.find((result) => result.fileName === mod);
+    assert.match(producer?.output ?? '', /export const count: number/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('S4: all module export forms keep public parameters un-narrowed, private ones narrow', () => {
+  // Locks the export-surface detection: ESM export/export{}/default/exported
+  // class methods and CommonJS module.exports all protect the public contract;
+  // private helpers still get the historic call-site inference.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 's4-forms-'));
+  const file = path.join(directory, 'a.ts');
+  const commonJsOptions: ts.CompilerOptions = {
+    ...compilerOptions,
+    module: ts.ModuleKind.CommonJS,
+    moduleResolution: ts.ModuleResolutionKind.Node10,
+  };
+  fs.writeFileSync(
+    file,
+    [
+      `export function direct(v: any){ return String(v); } direct('x');`,
+      `function later(v: any){ return String(v); } export { later }; later('x');`,
+      `export default function def(v: any){ return String(v); } def('x');`,
+      `const arrow=(v: any)=>String(v); export { arrow }; arrow('x');`,
+      `export class K { m(v: any){ return String(v); } }`,
+      `function cjs(v: any){ return String(v); } module.exports={cjs}; cjs('x');`,
+      `class Priv { m(v: any){ return String(v); } } new Priv().m('x');`,
+      `function internal(v: any){ return String(v); } internal('x');`,
+    ].join('\n'),
+    'utf8',
+  );
+  try {
+    const [result] = inferAnyInProject([file], commonJsOptions);
+    const output = result?.output ?? '';
+    assert.match(output, /export function direct\(v: any\)/);
+    assert.match(output, /function later\(v: any\)/);
+    assert.match(output, /function def\(v: any\)/);
+    assert.match(output, /const arrow=\(v: any\)/);
+    assert.match(output, /class K \{ m\(v: any\)/);
+    assert.match(output, /function cjs\(v: any\)/);
+    assert.match(output, /class Priv \{ m\(v: string\)/);
+    assert.match(output, /function internal\(v: string\)/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

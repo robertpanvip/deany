@@ -1,5 +1,6 @@
 import * as ts from 'typescript';
 
+import type { DeclarationProvider } from '../dts.js';
 import type { Evidence, InferAnyOptions, InferenceContext, InferenceTable, ShapeNode } from './types.js';
 
 export const DEFAULT_INFER_OPTIONS: InferAnyOptions = {
@@ -24,6 +25,8 @@ export function createContext(
   checker: ts.TypeChecker,
   program: ts.Program,
   table: InferenceTable,
+  dtsProviders?: ReadonlyMap<string, DeclarationProvider>,
+  narrowExportedParams = false,
 ): InferenceContext {
   return {
     checker,
@@ -31,12 +34,15 @@ export function createContext(
     table,
     referenceCache: new Map(),
     callCache: new Map(),
+    dtsProviders,
+    narrowExportedParams,
   };
 }
 
 export function emptyEvidence(): Evidence {
   return {
     sources: [],
+    weakSources: [],
     constraints: [],
     properties: new Map<string, string>(),
     elementShape: { children: new Map<string, ShapeNode>() },
@@ -51,6 +57,12 @@ export function emptyEvidence(): Evidence {
 export function addSource(evidence: Evidence, type: string | undefined): void {
   if (type !== undefined) {
     evidence.sources.push(type);
+  }
+}
+
+export function addWeakSource(evidence: Evidence, type: string | undefined): void {
+  if (type !== undefined) {
+    evidence.weakSources.push(type);
   }
 }
 
