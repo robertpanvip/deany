@@ -4,6 +4,18 @@ import type { InferenceContext } from './types.js';
 import { getScan } from './scan.js';
 import { isAssignmentOperatorKind, isFunctionLike, nonDeclarationFiles, ownerOf } from './util.js';
 
+/** Nearest enclosing function-like scope, or the SourceFile for module scope.
+ * TypeScript definite-assignment analysis does not flow across function
+ * boundaries: a write inside a nested function cannot satisfy it for a read in
+ * the enclosing scope, because that function may never be called. */
+function enclosingFunctionScope(node: ts.Node): ts.Node {
+  let current: ts.Node | undefined = node.parent ?? node;
+  while (current !== undefined && !ts.isSourceFile(current) && !isFunctionLike(current)) {
+    current = current.parent;
+  }
+  return current ?? node.getSourceFile();
+}
+
 /** All identifier references to `symbol` (O(1) lookup in the shared scan). */
 export function referencesOf(symbol: ts.Symbol, ctx: InferenceContext): ts.Identifier[] {
   return getScan(ctx).references.get(symbol) ?? [];
@@ -41,6 +53,7 @@ export function isUnassignedLetWithoutInit(owner: ts.Node, ctx: InferenceContext
   if (symbol === undefined) {
     return true;
   }
+  const declarationScope = enclosingFunctionScope(owner);
   for (const ref of referencesOf(symbol, ctx)) {
     if (ref === owner.name) {
       continue;
@@ -49,8 +62,15 @@ export function isUnassignedLetWithoutInit(owner: ts.Node, ctx: InferenceContext
     if (parent === undefined) {
       continue;
     }
-    // Any write to the binding means definite-assignment analysis would be
-    // satisfied after that point, so narrowing is safe.
+    // A write only satisfies definite-assignment for reads in the SAME
+    // function scope. A write inside a nested function/callback
+    // (`let v: any; function f() { v = 42 } const n = v`) does not count:
+    // TypeScript's flow analysis is not interprocedural, so `v` would still
+    // be "used before assigned" (TS2454) once narrowed to a concrete type.
+    // Ignore such writes so the binding keeps `any`. (Review bug B1.)
+    if (enclosingFunctionScope(ref) !== declarationScope) {
+      continue;
+    }
     if (
       ts.isBinaryExpression(parent) &&
       parent.left === ref &&

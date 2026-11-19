@@ -250,19 +250,26 @@ function isDefaultExportExpression(node: ts.Node): boolean {
   ) {
     return false;
   }
+  // Track the OUTERMOST transparent wrapper around the expression: for
+  // `export default ((v) => ...)`, the ExportAssignment's `.expression` is a
+  // ParenthesizedExpression, not the arrow itself. Compare against that
+  // wrapper rather than the raw node. (Line-by-line review bug B4.)
+  let exported: ts.Node = node;
   let current: ts.Node | undefined = node.parent;
-  // Transparent wrappers between the expression and `export default`.
   while (
     current !== undefined &&
-    (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isNonNullExpression(current))
+    (ts.isParenthesizedExpression(current) ||
+      ts.isAsExpression(current) ||
+      ts.isNonNullExpression(current))
   ) {
+    exported = current;
     current = current.parent;
   }
   return (
     current !== undefined &&
     ts.isExportAssignment(current) &&
     !current.isExportEquals &&
-    current.expression === node
+    current.expression === exported
   );
 }
 

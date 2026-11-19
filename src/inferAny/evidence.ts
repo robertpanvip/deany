@@ -531,33 +531,66 @@ export function constraintsFromReference(
     const initializer = parent.initializer;
     if (ts.isVariableDeclarationList(initializer) && initializer.declarations.length > 0) {
       const binding = initializer.declarations[0];
-      const loopVarSymbol =
-        binding !== undefined && ts.isIdentifier(binding.name)
-          ? ctx.checker.getSymbolAtLocation(binding.name)
-          : undefined;
-      if (loopVarSymbol !== undefined) {
-        let concrete: string | undefined;
-        const scanBody = (n: ts.Node): void => {
-          // `acc += v` / `v += acc`: only count `v` if it resolves to the loop
-          // variable's symbol. A shadowed same-name identifier is a different
-          // symbol and must be ignored.
-          if (
-            ts.isBinaryExpression(n) &&
-            (n.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken ||
-              NUMERIC_COERCION_OPERATORS.has(n.operatorToken.kind)) &&
-            ts.isIdentifier(n.right) &&
-            ctx.checker.getSymbolAtLocation(n.right) === loopVarSymbol
-          ) {
-            const accType = widenedTypeText(ctx.checker, ctx.checker.getTypeAtLocation(n.left), n.left);
-            if (accType === 'number' || accType === 'string') {
-              concrete = accType;
+      if (binding !== undefined) {
+        // (a) Existing primitive-accumulator evidence: `acc += v` pins the
+        // element to number/string. Symbol identity avoids shadowed locals.
+        if (ts.isIdentifier(binding.name)) {
+          const loopVarSymbol = ctx.checker.getSymbolAtLocation(binding.name);
+          if (loopVarSymbol !== undefined) {
+            let concrete: string | undefined;
+            const scanBody = (n: ts.Node): void => {
+              if (
+                ts.isBinaryExpression(n) &&
+                (n.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken ||
+                  NUMERIC_COERCION_OPERATORS.has(n.operatorToken.kind)) &&
+                ts.isIdentifier(n.right) &&
+                ctx.checker.getSymbolAtLocation(n.right) === loopVarSymbol
+              ) {
+                const accType = widenedTypeText(ctx.checker, ctx.checker.getTypeAtLocation(n.left), n.left);
+                if (accType === 'number' || accType === 'string') {
+                  concrete = accType;
+                }
+              }
+              ts.forEachChild(n, scanBody);
+            };
+            scanBody(parent.statement);
+            if (concrete !== undefined) {
+              elementType = concrete;
             }
           }
-          ts.forEachChild(n, scanBody);
-        };
-        scanBody(parent.statement);
-        if (concrete !== undefined) {
-          elementType = concrete;
+        }
+
+        // (b) Structural element evidence: dereferences in the loop body
+        // (`for (const v of xs) { v.a.b }`) prove the element's shape. Fold the
+        // same property chains used for iteration callbacks into elementShape;
+        // mergeEvidence refines `Iterable<unknown>` into `Iterable<shape>` so
+        // the very body we inspected type-checks. Destructured bindings
+        // (`for (const { a } of xs)`) prefix the chain with the property key.
+        // (Line-by-line review bugs B2/B3.)
+        if (elementType === 'unknown') {
+          if (ts.isIdentifier(binding.name)) {
+            for (const chain of propertyChainsOf(binding.name, parent.statement, ctx)) {
+              insertShapeChain(evidence.elementShape, chain);
+            }
+          } else if (ts.isObjectBindingPattern(binding.name)) {
+            for (const element of binding.name.elements) {
+              const keyNode = element.propertyName ?? element.name;
+              if (
+                !ts.isIdentifier(keyNode) &&
+                !ts.isStringLiteral(keyNode) &&
+                !ts.isNumericLiteral(keyNode)
+              ) {
+                continue;
+              }
+              const key = keyNode.text;
+              insertShapeChain(evidence.elementShape, [key]);
+              if (ts.isIdentifier(element.name)) {
+                for (const chain of propertyChainsOf(element.name, parent.statement, ctx)) {
+                  insertShapeChain(evidence.elementShape, [key, ...chain]);
+                }
+              }
+            }
+          }
         }
       }
     }

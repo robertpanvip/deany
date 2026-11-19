@@ -1383,3 +1383,47 @@ test('arch1: iteration methods (.map) keep an Array despite a for-of protocol', 
   const { output } = infer(`function f(xs: any) { for (const x of xs) {} return xs.map(v => v.id); }\n`);
   assert.match(output, /Array<\{ id: unknown; \}>/);
 });
+
+// --- Line-by-line review bugs B1–B4 ---------------------------------------
+test('B1: a write inside a nested function is not definite-assignment', () => {
+  // `function f(){ v = 42 }` may never run, so TS flow analysis does not treat
+  // `v` as assigned at the read site. Narrowing without `!` emitted TS2454.
+  const { output } = infer(
+    `let v: any;\nfunction f(){ v = 42; }\nconst n: number = v;\n`,
+  );
+  assert.match(output, /let v!: number;/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  // Control: a same-scope assignment stays safe without `!`.
+  const same = infer(`let v: any;\nv = 42;\nconst n: number = v;\n`);
+  assert.match(same.output, /let v: number;/);
+  assert.doesNotMatch(same.output, /let v!:/);
+});
+
+test('B2: for-of element dereferences fold into Iterable<shape>', () => {
+  // `v.a.b` in the loop body is structural evidence for the element. Emitting
+  // bare `Iterable<unknown>` made the very body fail TS18046. Keep the protocol
+  // (so Set/Generator are still accepted) but refine the element type.
+  const { output } = infer(`function f(xs: any){ for (const v of xs) { v.a.b; } }\n`);
+  assert.match(output, /Iterable<\{ a: \{ b: unknown; \}; \}>/);
+  const strict = checkStrict(
+    'case.ts',
+    output + '\nf(new Set([{a:{b:1}}]));\n',
+  );
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('B3: destructured for-of bindings fold into Iterable<shape>', () => {
+  // `for (const { a } of xs) { a.b }` — the binding key `a` prefixes the chain.
+  const { output } = infer(`function f(xs: any){ for (const {a} of xs) { a.b; } }\n`);
+  assert.match(output, /Iterable<\{ a: \{ b: unknown; \}; \}>/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('B4: a parenthesized anonymous default-export arrow is public API', () => {
+  // `export default ((v) => ...)` — the ExportAssignment's `.expression` is a
+  // ParenthesizedExpression. The arrow's parameters must stay protected.
+  const { output } = infer(`export default ((v: any) => String(v));\n`);
+  assert.match(output, /\(v: any\)/);
+});

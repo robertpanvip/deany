@@ -341,7 +341,21 @@ export function mergeEvidence(evidence: Evidence): {
       hasIterationMethod &&
       evidence.elementShape.children.size > 0
     ) {
+      // Array iteration methods (.map/.filter) need a real Array receiver.
       members = [`Array<${renderShapeNode(evidence.elementShape)}>`];
+      weak = true;
+    } else if (onlyProtocolConstraint && evidence.elementShape.children.size > 0) {
+      // Plain `for...of` / destructuring: KEEP the iteration protocol so Sets,
+      // Generators and strings remain accepted, but refine the opaque `unknown`
+      // element with the structural shape collected from the loop body. Without
+      // this, `for (const v of xs) { v.a.b }` yields `Iterable<unknown>` and the
+      // very body we inspected fails TS18046. (Line-by-line review B2/B3.)
+      const element = renderShapeNode(evidence.elementShape);
+      members = allowed.map((member) =>
+        member.startsWith('AsyncIterable<')
+          ? `AsyncIterable<${element}>`
+          : `Iterable<${element}>`,
+      );
       weak = true;
     } else {
       members = allowed;
