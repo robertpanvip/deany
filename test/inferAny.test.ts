@@ -1084,3 +1084,50 @@ test('S4: all module export forms keep public parameters un-narrowed, private on
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+// --- S4 regression: in-body shape evidence MUST still narrow exported params ---
+// Lowering call-site confidence must never suppress evidence derived from how
+// the function body actually *uses* its parameter. Property access, builtin
+// methods, destructuring and nested shapes are genuine implementation-level
+// contracts and must be inferred, even on an exported parameter.
+
+test('S4: in-body property shape narrows an exported param despite a call site', () => {
+  // The call site `process('hello')` is downgraded (ignored), but `value.length`
+  // is a real in-body shape and must still be inferred.
+  const { output } = infer(`
+export function process(value: any) { return value.length; }
+process('hello');
+`);
+  assert.match(output, /export function process\(value: \{ length: unknown; \}\)/);
+});
+
+test('S4: in-body builtin method narrows an exported param to its host type', () => {
+  const { output } = infer(`
+export function process(value: any) { return value.toFixed(2); }
+`);
+  assert.match(output, /export function process\(value: number\)/);
+});
+
+test('S4: in-body destructuring narrows an exported param to an object shape', () => {
+  const { output } = infer(`
+export function process(value: any) { const { a, b } = value; return a; }
+`);
+  assert.match(output, /export function process\(value: \{ a: unknown; b: unknown; \}\)/);
+});
+
+test('S4: a sibling .d.ts still outranks in-body shape evidence', () => {
+  // In-body shape is real evidence, but the declared contract remains the
+  // highest confidence and must win.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 's4-shape-dts-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(api, `export function process(value: any) { return value.length; } process('hello');\n`, 'utf8');
+  fs.writeFileSync(dts, `export declare function process(value: unknown): unknown;\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const producer = results.find((result) => result.fileName === api);
+    assert.match(producer?.output ?? '', /export function process\(value: unknown\)/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
