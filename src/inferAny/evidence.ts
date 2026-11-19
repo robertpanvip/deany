@@ -76,6 +76,7 @@ export function constraintsFromReference(
   reference: ts.Identifier,
   ctx: InferenceContext,
   evidence: Evidence,
+  depth = 0,
 ): void {
   const parent = reference.parent;
 
@@ -122,7 +123,7 @@ export function constraintsFromReference(
       // parent declarations are visited before their binding elements, so the
       // table may not hold the element's type yet on the first fixed-point pass
       // (and the parent then freezes as a strong owner).
-      const elementType = mergeEvidence(collectEvidence(element, ctx)).type;
+      const elementType = collectedType(element, ctx, depth + 1);
       const fieldType =
         (element.initializer !== undefined ? typeText(ctx, element.initializer) : undefined) ?? elementType;
       if (fieldType !== undefined && fieldType !== 'unknown' && fieldType !== 'never') {
@@ -624,8 +625,38 @@ export function constraintsFromReference(
   }
 }
 
+/**
+ * Hard cap on recursive `collectEvidence` descent (binding elements and opaque
+ * callback parameters each collect their children directly). Real code nests
+ * only a few levels; the cap prevents a pathological/cyclic input from
+ * recursing until stack overflow. Returning `undefined` past the cap is the
+ * conservative choice: it asks the caller to fall back to `unknown`.
+ */
+const MAX_COLLECT_DEPTH = 32;
+
+/**
+ * Collect the inferred *type string* for a node, memoised per fixed-point
+ * round. Recursive sites (binding elements, callback parameters) used to call
+ * `mergeEvidence(collectEvidence(node, ctx)).type` directly, recomputing the
+ * same subtree many times within one round. The memo is keyed by node and
+ * tagged with `ctx.round`; `buildInferenceTable` advances that round each pass
+ * so stale results can never leak across iterations.
+ */
+function collectedType(node: ts.Node, ctx: InferenceContext, depth: number): string | undefined {
+  if (depth > MAX_COLLECT_DEPTH) {
+    return undefined;
+  }
+  const cached = ctx.evidenceMemo.get(node);
+  if (cached !== undefined && cached.round === ctx.round) {
+    return cached.type;
+  }
+  const type = mergeEvidence(collectEvidence(node, ctx, depth)).type;
+  ctx.evidenceMemo.set(node, { round: ctx.round, type });
+  return type;
+}
+
 /** Collect type evidence for the declaration that owns an `any` annotation. */
-export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
+export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0): Evidence {
   const evidence = emptyEvidence();
 
   // A sibling `.d.ts` is the authoritative contract. If this declaration is
@@ -703,7 +734,7 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence
               // Compute directly rather than reading the table — a parent is
               // visited before its binding elements, so the table may be empty
               // for the element on the first pass and the parent then freezes.
-              const elementType = mergeEvidence(collectEvidence(element, ctx)).type;
+              const elementType = collectedType(element, ctx, depth + 1);
               if (elementType !== undefined && elementType !== 'unknown' && elementType !== 'never') {
                 fieldType = elementType;
               }
@@ -830,7 +861,7 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence
   const symbol = symbolOf(owner, ctx.checker);
   if (symbol !== undefined) {
     for (const reference of referencesOf(symbol, ctx)) {
-      constraintsFromReference(reference, ctx, evidence);
+      constraintsFromReference(reference, ctx, evidence, depth);
     }
   }
 
@@ -854,7 +885,7 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence
         // order parameter a precise callable type that the callback argument
         // satisfies, instead of a generic `(...args: unknown[])` that cannot
         // accept a narrowed callback (TS2345).
-        const callbackSig = opaqueCallbackSignature(argument, ctx);
+        const callbackSig = opaqueCallbackSignature(argument, ctx, depth);
         const evidenceType = callbackSig ?? typeText(ctx, argument);
         if (weakCallSites) {
           addWeakSource(evidence, evidenceType);
@@ -872,7 +903,7 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence
         const symbol = ctx.checker.getSymbolAtLocation(parent.name);
         if (symbol !== undefined) {
           for (const reference of referencesOf(symbol, ctx)) {
-            constraintsFromReference(reference, ctx, evidence);
+            constraintsFromReference(reference, ctx, evidence, depth);
           }
         }
       }
@@ -889,7 +920,11 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence
  * table (populated from member accesses inside the callback body) has the real
  * shape. Returns undefined when no parameter has a concrete inferred type.
  */
-export function opaqueCallbackSignature(node: ts.Expression, ctx: InferenceContext): string | undefined {
+export function opaqueCallbackSignature(
+  node: ts.Expression,
+  ctx: InferenceContext,
+  depth = 0,
+): string | undefined {
   if (!ts.isArrowFunction(node) && !ts.isFunctionExpression(node)) {
     return undefined;
   }
@@ -908,7 +943,7 @@ export function opaqueCallbackSignature(node: ts.Expression, ctx: InferenceConte
     // Compute directly: a call argument is visited before its callback's
     // parameters are entered into the table, so reading the table here would
     // see `undefined` on the first fixed-point pass.
-    const inferred = mergeEvidence(collectEvidence(param, ctx)).type;
+    const inferred = collectedType(param, ctx, depth + 1);
     params.push(
       param.dotDotDotToken
         ? `...${param.name.getText()}: ${inferred ?? 'unknown'}[]`

@@ -1,6 +1,7 @@
 import * as ts from 'typescript';
 
 import type { DeclarationProvider } from '../dts.js';
+import type { ProgramScan } from './scan.js';
 
 export interface InferAnyOptions {
   /** Report ambiguous sites instead of silently leaving them untouched. */
@@ -61,8 +62,16 @@ export interface InferenceContext {
   readonly checker: ts.TypeChecker;
   readonly program: ts.Program;
   readonly table: InferenceTable;
-  readonly referenceCache: Map<ts.Symbol, ts.Identifier[]>;
-  readonly callCache: Map<ts.SignatureDeclaration, CallSite[]>;
+  /** Lazily-built whole-program reference/call index, shared by all owners. */
+  scan?: ProgramScan;
+  /**
+   * Per-round memo for recursively collected node types. Values are tagged
+   * with the fixed-point round that produced them and are ignored in later
+   * rounds, because `collectEvidence` reads the evolving inference table.
+   */
+  readonly evidenceMemo: Map<ts.Node, { round: number; type?: string }>;
+  /** Current fixed-point round, used to invalidate the per-round memo. */
+  round: number;
   /**
    * Authoritative sibling `.d.ts` contracts, keyed by the source file path.
    * When a declaration has an entry here, its type outranks all usage

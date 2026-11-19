@@ -32,8 +32,8 @@ export function createContext(
     checker,
     program,
     table,
-    referenceCache: new Map(),
-    callCache: new Map(),
+    evidenceMemo: new Map(),
+    round: 0,
     dtsProviders,
     narrowExportedParams,
   };

@@ -33,6 +33,9 @@ export function buildInferenceTable(owners: readonly ts.Node[], ctx: InferenceCo
   let converged = true;
   for (let round = 0; round < maxRounds; round += 1) {
     rounds = round + 1;
+    // Invalidate per-round evidence memos: collectEvidence reads the evolving
+    // table, so a type collected in an earlier round is no longer trustworthy.
+    ctx.round = round + 1;
     let changed = false;
     for (const owner of owners) {
       const current = ownerType(ctx.table, owner);

@@ -1,32 +1,12 @@
 import * as ts from 'typescript';
 
-import type { CallSite, InferenceContext } from './types.js';
+import type { InferenceContext } from './types.js';
+import { getScan } from './scan.js';
 import { isAssignmentOperatorKind, isFunctionLike, nonDeclarationFiles, ownerOf } from './util.js';
 
-/** All identifier references to `symbol`, across the whole program (cached). */
+/** All identifier references to `symbol` (O(1) lookup in the shared scan). */
 export function referencesOf(symbol: ts.Symbol, ctx: InferenceContext): ts.Identifier[] {
-  const cached = ctx.referenceCache.get(symbol);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const references: ts.Identifier[] = [];
-  for (const sourceFile of nonDeclarationFiles(ctx.program)) {
-    const visit = (node: ts.Node): void => {
-      if (ts.isIdentifier(node) && node.text === symbol.getName()) {
-        let found = ctx.checker.getSymbolAtLocation(node);
-        if (found !== undefined && (found.flags & ts.SymbolFlags.Alias) !== 0) {
-          found = ctx.checker.getAliasedSymbol(found);
-        }
-        if (found === symbol) {
-          references.push(node);
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
-  }
-  ctx.referenceCache.set(symbol, references);
-  return references;
+  return getScan(ctx).references.get(symbol) ?? [];
 }
 
 /** True for `let`/`var x;` that has no initializer and is never assigned
@@ -89,30 +69,12 @@ export function isUnassignedLetWithoutInit(owner: ts.Node, ctx: InferenceContext
   return true;
 }
 
-/** Call sites whose resolved signature belongs to `declaration` (cached). */
+/** Call sites whose resolved signature belongs to `declaration` (O(1) lookup). */
 export function callsOf(
   declaration: ts.SignatureDeclaration,
   ctx: InferenceContext,
-): CallSite[] {
-  const cached = ctx.callCache.get(declaration);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const calls: CallSite[] = [];
-  for (const sourceFile of nonDeclarationFiles(ctx.program)) {
-    const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
-        const signature = ctx.checker.getResolvedSignature(node);
-        if (signature?.declaration === declaration) {
-          calls.push(node);
-        }
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sourceFile);
-  }
-  ctx.callCache.set(declaration, calls);
-  return calls;
+): readonly import('./types.js').CallSite[] {
+  return getScan(ctx).calls.get(declaration) ?? [];
 }
 
 /** All declarations that carry an `any` annotation, across non-declaration files. */

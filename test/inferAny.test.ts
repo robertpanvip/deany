@@ -1131,3 +1131,42 @@ test('S4: a sibling .d.ts still outranks in-body shape evidence', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+// --- Program-scan index regression: the single whole-program walk must keep
+// symbol identity semantics (no name collisions) and must not break deep
+// nesting or mixed call-site kinds after referencesOf/callsOf were rewritten.
+
+test('perf-index: identically named bindings in different scopes stay distinct', () => {
+  // referencesOf now keys the global index by symbol identity rather than by
+  // `node.text === symbol.getName()`. Two `value` bindings in different scopes
+  // must not share references, or their inferred types would cross-contaminate.
+  const { output } = infer(`
+let value: any;
+value = 1;
+function f() {
+  let value: any;
+  value = 'inner';
+}
+`);
+  assert.match(output, /let value!?: number;/);
+  assert.match(output, /let value!?: string;/);
+});
+
+test('perf-index: nested destructuring still infers a shape (depth guard not tripped)', () => {
+  const { output } = infer(`
+let data: any;
+const { a: { b: { c } } } = data;
+`);
+  assert.match(output, /let data!?: \{ a: unknown; \};/);
+});
+
+test('perf-index: new-expression and callback call sites are both indexed', () => {
+  const { output } = infer(`
+class C { constructor(x: any) {} }
+new C(42);
+function reg(cb: any) {}
+reg((z) => z + 1);
+`);
+  assert.match(output, /constructor\(x: number\)/);
+  assert.match(output, /cb: \( z: number \) => unknown/);
+});
