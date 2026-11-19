@@ -17,7 +17,7 @@ export {
   readCompilerOptions,
   DEFAULT_INFER_OPTIONS,
 } from './inferAny.js';
-export type { InferAnyOptions, AnySite, InferFileResult, UsageResolver } from './inferAny.js';
+export type { InferAnyOptions, AnySite, InferFileResult, FixedPointDiagnostics, UsageResolver } from './inferAny.js';
 export { DEFAULT_OPTIONS, DEFAULT_TSCONFIG_OPTIONS } from './types.js';
 export type {
   ConvertOptions,

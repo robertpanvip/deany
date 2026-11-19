@@ -945,6 +945,47 @@ take(c);
   }
 });
 
+test('fixed-point non-convergence is exposed on InferFileResult (arch P1)', () => {
+  // A long reverse dependency chain propagates one hop per round; with more
+  // hops than MAX_FIXED_POINT_ROUNDS the table cannot settle. The status MUST
+  // reach the public result so the CLI/API can warn instead of silently
+  // emitting a partially inferred file.
+  const lines: string[] = [];
+  const n = MAX_FIXED_POINT_ROUNDS + 4;
+  for (let i = 0; i < n - 1; i += 1) {
+    lines.push(`let v${i}: any = v${i + 1};`);
+  }
+  lines.push(`let v${n - 1}: any = 42;`);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'diag-nonconv-'));
+  const file = path.join(directory, 'chain.ts');
+  fs.writeFileSync(file, lines.join('\n') + '\n', 'utf8');
+  try {
+    const [result] = inferAnyInProject([file], compilerOptions);
+    assert.ok(result !== undefined);
+    assert.equal(result.diagnostics.converged, false);
+    assert.equal(result.diagnostics.rounds, MAX_FIXED_POINT_ROUNDS);
+    assert.equal(result.diagnostics.maxRounds, MAX_FIXED_POINT_ROUNDS);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('all file results share one project-level diagnostics object (arch P1)', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'diag-shared-'));
+  const a = path.join(directory, 'a.ts');
+  const b = path.join(directory, 'b.ts');
+  fs.writeFileSync(a, `const x: any = 1;\n`, 'utf8');
+  fs.writeFileSync(b, `const y: any = 's';\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([a, b], compilerOptions);
+    assert.equal(results.length, 2);
+    assert.equal(results[0]?.diagnostics.converged, true);
+    assert.strictEqual(results[0]?.diagnostics, results[1]?.diagnostics);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('tuple element any is projected to the element slot, not the whole tuple', () => {
   // `[any, number]` previously became `[[string, number], number]` (the whole
   // inferred tuple substituted into element 0) -> TS2322.
@@ -1088,6 +1129,54 @@ test('S4: all module export forms keep public parameters un-narrowed, private on
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('S4: anonymous default-export arrow function keeps its public parameter (arch 2.7)', () => {
+  // `export default (value) => ...` has no name and no modifier on the arrow
+  // itself; the export lives on the parent ExportAssignment. Its parameter is
+  // still public API and must not be narrowed by internal call sites.
+  const { output } = infer(`export default (value: any) => String(value);\n`);
+  assert.match(output, /export default \(value: any\)/);
+});
+
+test('S4: exports.foo = implementation protects implementation, not foo (arch 2.6)', () => {
+  // The exported value is the RHS `implementation`, so its public parameter
+  // stays `any`. `foo` is a private local and may still narrow from its call.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 's4-cjs-alias-'));
+  const file = path.join(directory, 'a.ts');
+  const commonJsOptions: ts.CompilerOptions = {
+    ...compilerOptions,
+    module: ts.ModuleKind.CommonJS,
+    moduleResolution: ts.ModuleResolutionKind.Node10,
+  };
+  fs.writeFileSync(
+    file,
+    [
+      `function foo(v: any){ return v.toFixed(2); }`,
+      `function implementation(v: any){ return String(v); }`,
+      `exports.foo = implementation;`,
+      `foo(1.5);`,
+    ].join('\n'),
+    'utf8',
+  );
+  try {
+    const [result] = inferAnyInProject([file], commonJsOptions);
+    const output = result?.output ?? '';
+    assert.match(output, /function foo\(v: number\)/);
+    assert.match(output, /function implementation\(v: any\)/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('weakSources surface as a diagnostic reason with narrowing still suppressed (arch 3.1)', () => {
+  // Collected but unused weak evidence is a smell. It now has a real consumer:
+  // the ambiguous-site reason explains why the public parameter stayed `any`.
+  const { output, sites } = infer(`export function api(v: any){ return v; }\napi(42);\n`);
+  assert.match(output, /export function api\(v: any\)/);
+  const reason = sites.find((s) => s.inferred === undefined)?.reason ?? '';
+  assert.match(reason, /internal call-site evidence/);
+  assert.match(reason, /number/);
 });
 
 // --- S4 regression: in-body shape evidence MUST still narrow exported params ---

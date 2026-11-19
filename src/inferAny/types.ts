@@ -20,10 +20,24 @@ export interface AnySite {
   readonly reason?: string;
 }
 
+/**
+ * Project-level fixed-point convergence status. Shared by every file result of
+ * one `inferAnyInProject` call, because the fixed point is computed once over
+ * the whole `ts.Program`, not per file. Exposed so CLI/API callers can detect a
+ * long dependency chain that hit the round cap and produced a partial table.
+ */
+export interface FixedPointDiagnostics {
+  readonly rounds: number;
+  readonly converged: boolean;
+  readonly maxRounds: number;
+}
+
 export interface InferFileResult {
   readonly fileName: string;
   readonly output: string;
   readonly sites: readonly AnySite[];
+  /** Project-level convergence status (identical reference across all files). */
+  readonly diagnostics: FixedPointDiagnostics;
 }
 
 export type FunctionLikeWithBody =

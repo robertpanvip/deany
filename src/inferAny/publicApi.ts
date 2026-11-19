@@ -38,6 +38,14 @@ export function isExportedDeclaration(
     return true;
   }
 
+  // 1b) An anonymous function/class expression used directly as the default
+  // export (`export default (v) => ...`, `export default function(){}`). The
+  // `export`/`default` modifier lives on the parent ExportAssignment, not on
+  // the expression, so the modifier check above cannot see it. (Arch review 2.7.)
+  if (isDefaultExportExpression(target)) {
+    return true;
+  }
+
   // 2) Class methods: a public method of an exported class is itself public API.
   // Private/protected members are never part of the surface.
   if (isClassMember(target)) {
@@ -61,7 +69,7 @@ export function isExportedDeclaration(
   // and `export { X as Y }`, including renamed re-exports).
   const nameNode = declarationName(target);
   if (nameNode === undefined) {
-    return isCommonJsExported(target);
+    return isCommonJsExported(target, checker);
   }
   const symbol = checker.getSymbolAtLocation(nameNode);
   const sourceFile = target.getSourceFile();
@@ -78,7 +86,7 @@ export function isExportedDeclaration(
 
   // 4) CommonJS `module.exports` / `exports.X` fallback (checker's export table
   // does not model CommonJS under all module settings).
-  return isCommonJsExported(target);
+  return isCommonJsExported(target, checker);
 }
 
 /** True when `param` is a parameter of an exported function/method. */
@@ -229,6 +237,35 @@ function declarationTarget(node: ts.Node): ts.Node | undefined {
   return undefined;
 }
 
+/**
+ * True when `node` is a function-like/class expression that is itself the
+ * default-exported value (`export default (v) => ...`). `isExportEquals`
+ * distinguishes `export default X` from the CommonJS `export = X` form.
+ */
+function isDefaultExportExpression(node: ts.Node): boolean {
+  if (
+    !ts.isArrowFunction(node) &&
+    !ts.isFunctionExpression(node) &&
+    !ts.isClassExpression(node)
+  ) {
+    return false;
+  }
+  let current: ts.Node | undefined = node.parent;
+  // Transparent wrappers between the expression and `export default`.
+  while (
+    current !== undefined &&
+    (ts.isParenthesizedExpression(current) || ts.isAsExpression(current) || ts.isNonNullExpression(current))
+  ) {
+    current = current.parent;
+  }
+  return (
+    current !== undefined &&
+    ts.isExportAssignment(current) &&
+    !current.isExportEquals &&
+    current.expression === node
+  );
+}
+
 /** For arrow/function expressions, the export modifier lives on the variable. */
 function enclosingNamedDeclaration(node: ts.Node): ts.Node | undefined {
   if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && ts.isVariableDeclaration(node.parent)) {
@@ -270,59 +307,83 @@ function isClassMember(
   );
 }
 
-/** Detect CommonJS exports by scanning the source file's top-level statements. */
-function isCommonJsExported(node: ts.Node): boolean {
+/**
+ * Detect CommonJS exports by scanning the source file's top-level statements.
+ *
+ * The identity of the *exported value* comes from the right-hand side of an
+ * assignment, not from the property name on the left. For
+ * `exports.foo = implementation` the declaration that becomes public is
+ * `implementation`, never a different function merely named `foo`.
+ * Symbol identity is preferred; a name comparison is kept only as a fallback
+ * for module configs where the checker does not bind CommonJS symbols.
+ * (Architecture review 2.6.)
+ */
+function isCommonJsExported(node: ts.Node, checker: ts.TypeChecker): boolean {
   const nameNode = declarationName(node);
   if (nameNode === undefined || !ts.isIdentifier(nameNode)) {
     return false;
   }
   const name = nameNode.text;
+  const nodeSymbol = symbolOfName(nameNode, checker);
   const sourceFile = node.getSourceFile();
+
+  const sameSymbol = (exprSymbol: ts.Symbol | undefined, fallbackName: string): boolean => {
+    if (nodeSymbol !== undefined && exprSymbol !== undefined) {
+      return nodeSymbol === exprSymbol;
+    }
+    // Fallback when the checker cannot bind one side: compare spellings.
+    return fallbackName === name;
+  };
+  const sameDeclaration = (expr: ts.Expression, fallbackName: string): boolean =>
+    sameSymbol(symbolOfAssignedValue(expr, checker), fallbackName);
+
   for (const statement of sourceFile.statements) {
+    if (!ts.isExpressionStatement(statement) || !ts.isBinaryExpression(statement.expression)) {
+      continue;
+    }
+    const bin = statement.expression;
+    if (bin.operatorToken.kind !== ts.SyntaxKind.EqualsToken) {
+      continue;
+    }
+    const left = bin.left;
     // exports.X = ... / module.exports.X = ...
-    if (ts.isExpressionStatement(statement) && ts.isBinaryExpression(statement.expression)) {
-      const bin = statement.expression;
-      if (bin.operatorToken.kind !== ts.SyntaxKind.EqualsToken) {
-        continue;
-      }
-      const left = bin.left;
-      if (ts.isPropertyAccessExpression(left) && ts.isIdentifier(left.name) && left.name.text === name) {
-        const root = left.expression;
-        if (ts.isIdentifier(root) && root.text === 'exports') {
-          return true;
-        }
-        if (
-          ts.isPropertyAccessExpression(root) &&
+    if (ts.isPropertyAccessExpression(left) && ts.isIdentifier(left.name)) {
+      const root = left.expression;
+      const isExports =
+        (ts.isIdentifier(root) && root.text === 'exports') ||
+        (ts.isPropertyAccessExpression(root) &&
           ts.isIdentifier(root.expression) &&
           root.expression.text === 'module' &&
-          root.name.text === 'exports'
-        ) {
-          return true;
-        }
+          root.name.text === 'exports');
+      if (isExports && sameDeclaration(bin.right, left.name.text)) {
+        return true;
       }
-      // module.exports = { X, Y } / exports = { X }
-      if (ts.isObjectLiteralExpression(bin.right)) {
-        const target = bin.left;
-        const isModuleExports =
-          (ts.isPropertyAccessExpression(target) &&
-            ts.isIdentifier(target.expression) &&
-            target.expression.text === 'module' &&
-            target.name.text === 'exports') ||
-          (ts.isIdentifier(target) && target.text === 'exports');
-        if (isModuleExports) {
-          for (const prop of bin.right.properties) {
-            if (
-              ts.isShorthandPropertyAssignment(prop) &&
-              ts.isIdentifier(prop.name) &&
-              prop.name.text === name
-            ) {
+    }
+    // module.exports = { X, Y } / exports = { ... }
+    if (ts.isObjectLiteralExpression(bin.right)) {
+      const target = bin.left;
+      const isModuleExports =
+        (ts.isPropertyAccessExpression(target) &&
+          ts.isIdentifier(target.expression) &&
+          target.expression.text === 'module' &&
+          target.name.text === 'exports') ||
+        (ts.isIdentifier(target) && target.text === 'exports');
+      if (isModuleExports) {
+        for (const prop of bin.right.properties) {
+          // `{ foo }` — the value is the identifier `foo` itself. Use the
+          // dedicated API: getSymbolAtLocation on a shorthand name returns the
+          // property symbol in some module configs, not the bound variable.
+          if (ts.isShorthandPropertyAssignment(prop) && ts.isIdentifier(prop.name)) {
+            if (sameSymbol(checker.getShorthandAssignmentValueSymbol(prop), prop.name.text)) {
               return true;
             }
-            if (
-              ts.isPropertyAssignment(prop) &&
-              ts.isIdentifier(prop.name) &&
-              prop.name.text === name
-            ) {
+          }
+          // `{ publicName: implementation }` — the value is the RHS expression.
+          if (ts.isPropertyAssignment(prop)) {
+            const keyText = ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)
+              ? prop.name.text
+              : undefined;
+            if (keyText !== undefined && sameDeclaration(prop.initializer, keyText)) {
               return true;
             }
           }
@@ -331,4 +392,27 @@ function isCommonJsExported(node: ts.Node): boolean {
     }
   }
   return false;
+}
+
+/** Resolve the symbol a declaration name binds to, following aliases. */
+function symbolOfName(name: ts.Node, checker: ts.TypeChecker): ts.Symbol | undefined {
+  const symbol = checker.getSymbolAtLocation(name);
+  if (symbol === undefined) {
+    return undefined;
+  }
+  return (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(symbol) : symbol;
+}
+
+/** Resolve the symbol of an assigned RHS expression (identifier or function name). */
+function symbolOfAssignedValue(expr: ts.Expression, checker: ts.TypeChecker): ts.Symbol | undefined {
+  if (ts.isIdentifier(expr)) {
+    return symbolOfName(expr, checker);
+  }
+  if (
+    (ts.isFunctionExpression(expr) || ts.isClassExpression(expr)) &&
+    expr.name !== undefined
+  ) {
+    return symbolOfName(expr.name, checker);
+  }
+  return undefined;
 }

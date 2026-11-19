@@ -2,4 +2,4 @@
 export { inferAnyInProject, readCompilerOptions } from './inferAny/infer.js';
 export { createUsageResolver } from './inferAny/usageResolver.js';
 export { DEFAULT_INFER_OPTIONS } from './inferAny/state.js';
-export type { InferAnyOptions, AnySite, InferFileResult, UsageResolver } from './inferAny/types.js';
+export type { InferAnyOptions, AnySite, InferFileResult, FixedPointDiagnostics, UsageResolver } from './inferAny/types.js';

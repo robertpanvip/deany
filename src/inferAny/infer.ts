@@ -199,7 +199,7 @@ export function inferAnyInProject(
     for (const edit of edits.sort((a, b) => b.start - a.start)) {
       output = output.slice(0, edit.start) + edit.text + output.slice(edit.end);
     }
-    results.push({ fileName, output, sites });
+    results.push({ fileName, output, sites, diagnostics: ctx.table.diagnostics });
   }
 
   return results;

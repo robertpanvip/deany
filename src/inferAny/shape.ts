@@ -390,6 +390,15 @@ export function mergeEvidence(evidence: Evidence): {
     // interpolation alone — `unknown` is the honest answer.
     members = ['unknown'];
     weak = true;
+  } else if (evidence.weakSources.length > 0) {
+    // Only low-confidence call-site evidence exists (S4: internal callers of
+    // an exported parameter). It is deliberately NOT used to narrow the
+    // public contract, but surface it in the reason so diagnostics can explain
+    // why the `any` was kept instead of silently discarding collected data.
+    // (Architecture review 3.1 — give weakSources a real consumer.)
+    return {
+      reason: `only internal call-site evidence (${[...new Set(evidence.weakSources)].join(', ')}); public parameter left un-narrowed`,
+    };
   } else {
     return { reason: 'no usage evidence' };
   }

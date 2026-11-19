@@ -323,6 +323,19 @@ function inferMain(argv: readonly string[]): number {
   let unresolved = 0;
   const written: string[] = [];
 
+  // The fixed point is computed once for the whole program, so every result
+  // carries the same diagnostics object. Warn once when it did not converge:
+  // a long reverse dependency chain can hit the round cap and leave some
+  // bindings only partially inferred — silently emitting that result is worse
+  // than telling the caller to raise the cap or restructure the chain.
+  const convergence = results[0]?.diagnostics;
+  if (convergence !== undefined && !convergence.converged) {
+    process.stderr.write(
+      `warning: fixed-point inference did not converge after ${convergence.maxRounds} rounds ` +
+        `(${convergence.rounds} executed); output for long dependency chains may be incomplete.\n`,
+    );
+  }
+
   for (const result of results) {
     const relative = inputIsDirectory ? path.relative(path.resolve(args.input), result.fileName) : path.basename(result.fileName);
     const target = inputIsDirectory ? path.join(args.output, relative) : args.output;

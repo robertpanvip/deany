@@ -83,7 +83,7 @@ deany infer-any app.ts -o app.inferred.ts --check
 
 联合类型成员会按需加括号（函数成员、嵌套位置）以保证严格语法正确。只有完全没有任何证据时才保留 `any` 并报告 `no usage evidence`。
 
-**链式传播（fixed point）**：推断是迭代到收敛的——一个已经推断出的类型会作为证据喂给下一轮，因此「函数返回 → 接住它的变量 → 再接住的变量」可以正向串起来，且**跨文件 / 跨 import** 同样生效：
+**链式传播（fixed point）**：推断按轮迭代——一个已经推断出的类型会作为证据喂给下一轮，因此「函数返回 → 接住它的变量 → 再接住的变量」可以正向串起来，且**跨文件 / 跨 import** 同样生效。迭代在结果不再变化时提前收敛，上限为 16 轮；若超长反向依赖链在 16 轮内仍未收敛，收敛状态会通过 `InferFileResult.diagnostics` 暴露，CLI 会输出警告提示结果可能不完整（而不会静默产出）：
 
 ```ts
 // a.ts
@@ -156,7 +156,9 @@ format(value);                                     // value → number
 
 强证据（初始化器、赋值、实参、`typeof`/守卫收窄、返回值传播）一旦确定就固定；只有弱证据形状保持可变、等待精化。没有任何具体证据时，才保留方法形状。
 
-`infer-any` 与 JS 隐式 any 反推（`createUsageResolver`）共用这套迭代引擎。推断结果只增不改（一旦确定就固定），最多 16 轮，实测大型项目（lodash 单文件 579KB / async 102 文件）均在 1 秒内完成。
+**公共 API 不被内部调用点收窄（S4）**：导出函数 / 方法 / 构造器 / 默认导出（含匿名箭头）的参数属于公共契约，**不会**仅因为仓库内部的 `f(具体值)` 调用就被收窄为那个具体类型——外部调用者可以传入任意合法值。这类内部调用点证据记为低置信度的 `weakSources`，不参与定案，但在歧站点的诊断里会说明「仅检测到内部调用点，公共参数保持未收窄」。真正的函数体内部证据（初始化器、`typeof` 守卫、属性/解构形状、同名 `.d.ts` 契约）不受此限制，仍可精确收窄；同名 `.d.ts` 契约置信度最高，甚至能还原 bare `unknown`。非导出的私有声明保持原有调用点推断行为不变。
+
+`infer-any` 与 JS 隐式 any 反推（`createUsageResolver`）共用这套迭代引擎。推断结果只增不改（一旦确定就固定），最多 16 轮；每轮的收敛状态（`rounds` / `converged` / `maxRounds`）记录在 `InferenceTable.diagnostics`，并随 `InferFileResult.diagnostics` 对外暴露，未收敛时 CLI 输出警告。实测大型项目（lodash 单文件 579KB / async 102 文件）均在 1 秒内完成。
 
 **嵌套 any 槽位投影**：推断表存的是「整个声明的值类型」，但替换时只把 `any` 所在的那一个槽位投影出来，避免双重包装：
 
@@ -355,7 +357,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 131 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、默认值/位运算/比较/in、for-of/解构/await/分支、幂运算/注解目标/展开/短路赋值、迭代回调元素深层形状、typeof function 合法化、catch 变量注解规避、弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数与真实项目回归）
+npm test            # 260 项单元测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、默认值/位运算/比较/in、for-of/解构/await/分支、幂运算/注解目标/展开/短路赋值、迭代回调元素深层形状、typeof function 合法化、catch 变量注解规避、弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数、公共 API 导出边界与真实项目回归）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
