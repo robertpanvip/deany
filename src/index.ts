@@ -28,4 +28,4 @@ export type {
   TsConfigOptions,
 } from './types.js';
 export type { CheckResult } from './check.js';
-export type { BatchResult } from './fs.js';
+export type { BatchResult, FileError } from './fs.js';

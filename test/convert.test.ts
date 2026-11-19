@@ -8,6 +8,7 @@ import { checkStrict } from '../src/check.js';
 import { strictTsConfig } from '../src/config.js';
 import { convertSource } from '../src/convert.js';
 import { createUsageResolver } from '../src/inferAny.js';
+import { collectJsFiles, convertPath } from '../src/fs.js';
 
 const jsCompilerOptions: ts.CompilerOptions = {
   allowJs: true, checkJs: true, noEmit: true, strict: true,
@@ -443,4 +444,58 @@ test('a UTF-8 BOM does not skew annotation offsets', () => {
   // should be — right after a decl keyword or an opening paren.
   assert.doesNotMatch(output, /(?:\b(?:const|let|var)\s*:|\(\s*:)/);
   assert.equal(checkStrict('bom.ts', output).ok, true);
+});
+
+test('--check retries with @types/node for modern node: specifiers', () => {
+  // Regression (P1-7): TS2591 for `import path from 'node:path'` names neither
+  // `process` nor `Buffer`, so the old global-name whitelist missed it and the
+  // @types/node retry never fired — every ESM project using node: was flagged.
+  const result = checkStrict(
+    'case.ts',
+    `import path from 'node:path';\nexport const p = path.join('a', 'b');\n`,
+  );
+  assert.equal(result.ok, true, result.diagnostics.join('\n'));
+});
+
+test('directory discovery includes mjs/cjs/jsx and does not skip dist or .codebuddy', () => {
+  // Regression (P1-8): only .js was collected (mjs/cjs/jsx silently ignored),
+  // SKIP_DIRECTORIES hardcoded the author's .codebuddy folder and skipped every
+  // directory merely named `dist`.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'discover-'));
+  try {
+    for (const name of ['a.js', 'b.mjs', 'c.cjs', 'd.jsx', 'skip.txt']) {
+      fs.writeFileSync(path.join(dir, name), '');
+    }
+    for (const sub of ['dist', '.codebuddy']) {
+      fs.mkdirSync(path.join(dir, sub));
+      fs.writeFileSync(path.join(dir, sub, 'e.js'), '');
+    }
+    const found = collectJsFiles(dir).map((f) => path.basename(f)).sort();
+    assert.deepEqual(found, ['a.js', 'b.mjs', 'c.cjs', 'd.jsx', 'e.js', 'e.js'].sort());
+    assert.ok(!found.includes('skip.txt'));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('batch conversion isolates a crashing file and still converts the rest', () => {
+  // Regression (P2-9): a single pathological file (deep nesting -> TS
+  // RangeError) used to abort the whole directory and dump a raw stack. The
+  // batch must catch per-file errors, keep going, and report them in errors[].
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-isolate-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'good.js'), 'const x = 1;\n', 'utf8');
+    fs.writeFileSync(
+      path.join(dir, 'evil.js'),
+      'function f(a = ' + '('.repeat(20000) + '1' + ')'.repeat(20000) + ') {}',
+      'utf8',
+    );
+    const out = path.join(dir, 'out');
+    const result = convertPath(dir, out, { banner: false });
+    assert.equal(result.written.length, 1, 'the good file should still be written');
+    assert.equal(result.errors.length, 1, 'the crashing file should be recorded');
+    assert.match(result.errors[0]?.file ?? '', /evil\.js$/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

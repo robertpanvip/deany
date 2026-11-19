@@ -102,6 +102,16 @@ test('TS built-in utility types are not emitted as dangling fallback aliases', (
   assert.deepEqual(extractCustomTypeNames('Missing Foo', new Set(), new Set()).sort(), ['Foo', 'Missing']);
 });
 
+test('capitalized property names in object type literals are not custom types', () => {
+  // Regression: `@param {{Name: string, Age: number}}` was scanned for
+  // capitalized identifiers, so `Name`/`Age` (property names, not type refs)
+  // became bogus `type Name = unknown; type Age = unknown;` aliases.
+  assert.deepEqual(extractCustomTypeNames('{Name: string, Age: number}', new Set(), new Set()), []);
+  assert.deepEqual(extractCustomTypeNames('{Foo: Bar}', new Set(), new Set()), ['Bar']);
+  // A real capitalized type reference inside an object value is still found.
+  assert.deepEqual(extractCustomTypeNames('{ value: Missing }', new Set(), new Set()), ['Missing']);
+});
+
 test('normalizeJsDocType defaults options when omitted', () => {
   // Regression: the public export must not throw when called with one arg.
   assert.equal(normalizeJsDocType('string'), 'string');

@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import * as ts from 'typescript';
 import { inferAnyInProject } from '../src/inferAny.js';
+import { checkStrict } from '../src/check.js';
 import { buildInferenceTable } from '../src/inferAny/table.js';
 import { createContext, createTable, MAX_FIXED_POINT_ROUNDS } from '../src/inferAny/state.js';
 import { collectAnyOwners } from '../src/inferAny/collect.js';
@@ -818,15 +819,20 @@ takeString(x);
   assert.match(output, /let x!?: any;/);
 });
 
-test('infers string from template interpolation, concatenation and strict comparison', () => {
+test('string-like contexts alone do not narrow any to string', () => {
+  // Regression (P0-2): template interpolation, `+` with a string, and `===`
+  // a string literal all accept non-strings (numbers, booleans, objects).
+  // Treating them as proof of `string` silently narrowed the public contract:
+  // `function tpl(x: any)` became `x: string`, so `tpl(42)` broke. With no
+  // real evidence, the `any` must stay untouched.
   const { output } = infer(`
 function interpolated(id: any): string { return \`id is \${id}\`; }
 function concatenated(a: any): string { return 'x' + a; }
 function compared(id: any): boolean { return id === 'x'; }
 `);
-  assert.match(output, /function interpolated\(id: string\)/);
-  assert.match(output, /function concatenated\(a: string\)/);
-  assert.match(output, /function compared\(id: string\)/);
+  assert.match(output, /function interpolated\(id: any\): string/);
+  assert.match(output, /function concatenated\(a: any\): string/);
+  assert.match(output, /function compared\(id: any\): boolean/);
 });
 
 test('string contexts are a weak hint and never override real numeric evidence', () => {
@@ -954,4 +960,23 @@ test('function-type return any is projected to the return slot, not re-wrapped',
   const { output } = infer(`export const cb: (x: number) => any = x => x;`);
   assert.match(output, /const cb: \(x: number\) => number/);
   assert.doesNotMatch(output, /=> \(x: number\) =>/);
+});
+// --- P0 regression: early return, weak evidence, for-of element ------------
+
+test('early return with an implicit undefined path includes undefined in the return type', () => {
+  // Regression (P0-1): `if (c) return 1;` also falls through to an implicit
+  // `undefined`. Typing the return as just `number` makes --check fail TS2366.
+  const { output } = infer(`function pick(c: any): any { if (c) return 1; }\n`);
+  assert.match(output, /number \| undefined/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('for-of element type is inferred from the loop body so the body type-checks', () => {
+  // Regression (P0-3): narrowing `list: any` to an array must not leave the
+  // loop variable `unknown` and break `t += v` (TS18046).
+  const { output } = infer(`function total(list: any) { let t = 0; for (const v of list) { t += v; } return t; }\n`);
+  assert.match(output, /list: number\[\]/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });

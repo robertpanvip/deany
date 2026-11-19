@@ -223,7 +223,7 @@ function convertMain(argv: readonly string[]): number {
         })
       : undefined;
 
-  const { results, written } = convertPath(
+  const { results, written, errors } = convertPath(
     args.input,
     args.output,
     args.options,
@@ -237,6 +237,14 @@ function convertMain(argv: readonly string[]): number {
   }
   for (const file of written) {
     process.stdout.write(`converted -> ${file}\n`);
+  }
+  // Per-file failures are isolated: report them all at the end instead of
+  // letting the first one dump a raw stack trace and abort the batch.
+  if (errors.length > 0) {
+    for (const error of errors) {
+      process.stderr.write(`error: skipped ${error.file}: ${error.message}\n`);
+    }
+    process.stderr.write(`${errors.length} file(s) failed; ${written.length} converted.\n`);
   }
 
   if (args.initConfig) {
@@ -266,7 +274,9 @@ function convertMain(argv: readonly string[]): number {
     process.stdout.write('strict type check passed.\n');
   }
 
-  return 0;
+  // Partial failures still make the command fail overall, without having
+  // aborted the successful conversions.
+  return errors.length > 0 ? 1 : 0;
 }
 
 function inferMain(argv: readonly string[]): number {

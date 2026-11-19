@@ -37,6 +37,14 @@ function mentionsNodeGlobal(diagnostic: ts.Diagnostic): boolean {
     return false;
   }
   const text = ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n');
+  // TS2591 for a modern `node:` specifier reads: "Cannot find name 'node:path'.
+  // Do you need to install type definitions for node?" — it names neither
+  // `process` nor `Buffer`, so the global-name whitelist misses it and the
+  // @types/node retry never fires. The "type definitions for node" phrase is
+  // the reliable marker across both bare globals and `node:` imports.
+  if (/type definitions for node/i.test(text)) {
+    return true;
+  }
   return /\b(module|require|process|global|Buffer|__dirname|__filename|NodeJS)\b/.test(text);
 }
 

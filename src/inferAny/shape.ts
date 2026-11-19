@@ -288,7 +288,7 @@ export function mergeEvidence(evidence: Evidence): {
         // An object literal later extended with `obj.field = v` / `obj.m()`
         // really has those members. Absorb them into its own shape source;
         // the helper no-ops on concrete classes and non-object sources, so
-        // call-site/具体类型 and `instanceof` results stay untouched.
+        // call-site types and `instanceof` results stay untouched.
         sources[i] = mergeObjectShapeWithProperties(source, evidence.properties);
       }
     }
@@ -359,12 +359,15 @@ export function mergeEvidence(evidence: Evidence): {
     members = [renderPropertyShape(evidence.properties)];
     weak = true;
   } else if (evidence.stringContext) {
-    // Last resort: a binding observed only in string-like contexts (template
-    // interpolation, `+` with a string, `===` a string literal) is string-like.
-    // Weak so a later fixed-point round with a concrete source still refines it:
-    // interpolation and `+` also accept numbers, so this must never override
-    // real evidence such as `x = 1` or `x + 1`.
-    members = ['string'];
+    // A binding observed only in string-like contexts (template interpolation,
+    // `+` with a string, `===` a string literal) is NOT proven to be a string:
+    // interpolation and `+` accept numbers, booleans, objects — anything with
+    // a toString. Emitting `string` here silently narrowed the public contract
+    // (`function tpl(x: any) { return `${x}` }` became `x: string`, so `tpl(42)`
+    // turned from valid to a type error). Keep the weak marker so a real source
+    // from a later round can still refine it, but never claim `string` on
+    // interpolation alone — `unknown` is the honest answer.
+    members = ['unknown'];
     weak = true;
   } else {
     return { reason: 'no usage evidence' };

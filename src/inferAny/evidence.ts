@@ -4,11 +4,71 @@ import type { Evidence, InferenceContext } from './types.js';
 import { controlFlowNarrowedType } from './controlFlow.js';
 import { addConstraint, addSource, emptyEvidence } from './state.js';
 import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES } from './constants.js';
-import { arrayElementTypeOf, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType } from './util.js';
+import { arrayElementTypeOf, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
 import { customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsOf } from './shape.js';
 import { arithmeticNumberType, instanceTypeOf, orderableOperandType, symbolTypeText, typePredicateOfArgument, typeText } from './typeText.js';
 import { collectMutationEvidence, containerInstantiationFromMutations } from './mutation.js';
 import { callsOf, referencesOf } from './collect.js';
+
+/**
+ * Whether control can reach the end of a statement list (i.e. fall through to
+ * an implicit `undefined` return). Used so a function with a value return on
+ * only *some* paths is typed `T | undefined`, not just `T` — otherwise strict
+ * mode rejects it with TS2366 ("Function lacks ending return statement").
+ * Conservative: anything we cannot prove always-terminating counts as a
+ * possible fall-through, which only ever widens the type (safe).
+ */
+function statementsMayFallThrough(statements: readonly ts.Statement[]): boolean {
+  for (const statement of statements) {
+    if (statementAlwaysTerminates(statement)) {
+      return false; // unreachable past this point
+    }
+  }
+  return true;
+}
+
+function statementAlwaysTerminates(statement: ts.Statement): boolean {
+  if (ts.isReturnStatement(statement) || ts.isThrowStatement(statement)) {
+    return true;
+  }
+  if (ts.isBlock(statement)) {
+    return statementsMayFallThrough(statement.statements) === false;
+  }
+  if (ts.isIfStatement(statement)) {
+    // Terminates only if there is an else and BOTH branches terminate.
+    return (
+      statement.elseStatement !== undefined &&
+      statementAlwaysTerminates(statement.thenStatement) &&
+      statementAlwaysTerminates(statement.elseStatement)
+    );
+  }
+  if (ts.isSwitchStatement(statement)) {
+    // Terminates only with a default case and no fall-through out of any clause.
+    const clauses = statement.caseBlock.clauses;
+    if (!clauses.some((c) => ts.isDefaultClause(c))) {
+      return false;
+    }
+    return clauses.every((clause) =>
+      clause.statements.length > 0 && statementAlwaysTerminates(clause.statements[clause.statements.length - 1]!),
+    );
+  }
+  if (ts.isTryStatement(statement)) {
+    // Both try and every catch/finally path must terminate.
+    const tryTerminates = statementsMayFallThrough(statement.tryBlock.statements) === false;
+    const catchTerminates =
+      statement.catchClause === undefined ||
+      statementsMayFallThrough(statement.catchClause.block.statements) === false;
+    const finallyTerminates =
+      statement.finallyBlock === undefined ||
+      statementsMayFallThrough(statement.finallyBlock.statements) === false;
+    return tryTerminates && catchTerminates && finallyTerminates;
+  }
+  // Labeled statement wrapping a terminating statement.
+  if (ts.isLabeledStatement(statement)) {
+    return statementAlwaysTerminates(statement.statement);
+  }
+  return false;
+}
 
 /** Extract constraints from one reference to the `any`-typed binding. */
 export function constraintsFromReference(
@@ -452,10 +512,46 @@ export function constraintsFromReference(
     }
   }
 
-  // `for (const v of x)` -> x must be iterable. `unknown[]` is the strict-safe
-  // stand-in (its elements are the loop variable's type).
+  // `for (const v of x)` -> x must be iterable. Normally the element type is
+  // `unknown` (the strict-safe stand-in). But if the loop body pins the element
+  // to a concrete primitive — e.g. `t += v` where `t` is a number, or `s += v`
+  // where `s` is a string — use that type so `v` stays usable and the loop body
+  // doesn't fail TS18046 after x was narrowed from `any` to an array. Otherwise
+  // the tool emits code its own strict gate rejects. A plain `void v` / bare
+  // use leaves the conservative `unknown[]`.
   if (ts.isForOfStatement(parent) && parent.expression === reference) {
-    addConstraint(evidence, 'unknown[]');
+    let elementType = 'unknown';
+    const initializer = parent.initializer;
+    if (ts.isVariableDeclarationList(initializer) && initializer.declarations.length > 0) {
+      const binding = initializer.declarations[0];
+      const loopVar =
+        binding !== undefined && ts.isIdentifier(binding.name) ? binding.name.text : undefined;
+      if (loopVar !== undefined) {
+        let concrete: string | undefined;
+        const scanBody = (n: ts.Node): void => {
+          // `acc += v` / `v += acc`: the accumulator's checker type is the type
+          // v must be addable to. Use a primitive only when unambiguous.
+          if (
+            ts.isBinaryExpression(n) &&
+            (n.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken ||
+              NUMERIC_COERCION_OPERATORS.has(n.operatorToken.kind)) &&
+            ts.isIdentifier(n.right) &&
+            n.right.text === loopVar
+          ) {
+            const accType = widenedTypeText(ctx.checker, ctx.checker.getTypeAtLocation(n.left), n.left);
+            if (accType === 'number' || accType === 'string') {
+              concrete = accType;
+            }
+          }
+          ts.forEachChild(n, scanBody);
+        };
+        scanBody(parent.statement);
+        if (concrete !== undefined) {
+          elementType = concrete;
+        }
+      }
+    }
+    addConstraint(evidence, `${elementType}[]`);
   }
 
   // Destructuring: `const [a, b] = x` -> x is array-like; `const { foo } = x`
@@ -707,6 +803,12 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence
       isGenerator || ts.isConstructorDeclaration(owner) || ts.isSetAccessorDeclaration(owner);
     if (!hasValueReturn && !cannotReturnVoid) {
       addSource(evidence, 'void');
+    } else if (hasValueReturn && statementsMayFallThrough(owner.body.statements)) {
+      // Some paths return a value but control can also reach the end of the
+      // body, so the function implicitly returns `undefined` on those paths.
+      // Without this the inferred `T` is too narrow and strict mode emits
+      // TS2366. Add `undefined` so the honest union `T | undefined` is emitted.
+      addSource(evidence, 'undefined');
     }
   }
 

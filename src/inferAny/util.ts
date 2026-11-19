@@ -425,10 +425,6 @@ export function objectArgumentIndices(call: ts.CallExpression): readonly number[
 }
 
 /**
- * Instance type produced by `x instanceof Ctor`, or undefined if the right
- * operand has no usable class/function symbol (e.g. a complex expression).
- */
-export /**
  * For `x instanceof Ctor`, checker's declared type of a generic class leaks
  * uninstantiated type parameters (`Map<K, V>`, `Set<T>`) which produce TS2304
  * when written back. Prefer the construct signature's return type (already
@@ -436,7 +432,7 @@ export /**
  * remaining bare single-letter parameters to `unknown` — the element type is
  * genuinely unknown from an instanceof check alone.
  */
-function sanitizeInstanceType(text: string): string {
+export function sanitizeInstanceType(text: string): string {
   let result = text;
   result = result.replace(/<([A-Z](?:\s*,\s*[A-Z])*)>/g, (_m, inner: string) => {
     const args = inner.split(',').map((part) => part.trim());

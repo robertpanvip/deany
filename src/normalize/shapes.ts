@@ -127,7 +127,15 @@ export function extractCustomTypeNames(
 ): string[] {
   const found = new Set<string>();
   // Match dotted paths too (`Foo.Bar` -> `Foo`), and skip `module:`/`typeof`.
-  const cleaned = typeText.replace(/\bmodule:/g, '').replace(/\btypeof\s+/g, '');
+  let cleaned = typeText.replace(/\bmodule:/g, '').replace(/\btypeof\s+/g, '');
+  // In an object type literal `{ Name: string, Age: number }`, `Name`/`Age`
+  // are property names, not type references. Capitalized property names must
+  // not become bogus `type Name = unknown;` aliases. Blank out identifiers
+  // that sit immediately before `:` inside braces (record/object members).
+  // (Conditional-type `? A : B` has no `{` scope here, so it is unaffected.)
+  cleaned = cleaned.replace(/\{([^{}]*)\}/g, (_whole, body: string) =>
+    `{${body.replace(/([A-Za-z_$][\w$]*)\s*:/g, (_m, key: string) => ' '.repeat(key.length) + ':')}}`,
+  );
   const tokens = cleaned.match(/[A-Za-z_$][\w$]*/g) ?? [];
   for (const token of tokens) {
     if (

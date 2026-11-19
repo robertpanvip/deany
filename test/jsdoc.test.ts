@@ -48,6 +48,32 @@ test('parses balanced brace types and typedef names', () => {
   assert.equal(block.tags.filter((tag) => tag.tag === 'property').length, 2);
 });
 
+test('parses an optional rest parameter [...args] as variadic with a clean name', () => {
+  // Regression: `[...args]` used to become name `...args` with variadic=false,
+  // producing `...args: { length: number; }[]` and a "no matching parameter"
+  // diagnostic. The brackets must be stripped AND the leading `...` honored.
+  const tag = parseJsDocBlocks('/** @param {...number} [...args] */')[0]?.tags[0];
+  assert.equal(tag?.name, 'args');
+  assert.equal(tag?.variadic, true);
+  assert.equal(tag?.optional, true);
+});
+
+test('ignores JSDoc-looking text inside strings, templates and regexes', () => {
+  // Regression: parseJsDocBlocks used a plain indexOf('/**') scan, so a fake
+  // tag inside a string literal injected a bogus type alias into the output.
+  const cases = [
+    `const note = " /** @param {StringInsideString} x */";`,
+    'const tpl = ` /** @param {FromTemplate} x */`;',
+    'const re = /\\/\\*\\* @param {FromRegex} x/;',
+  ];
+  for (const src of cases) {
+    const blocks = parseJsDocBlocks(src);
+    assert.equal(blocks.length, 0, `unexpected JSDoc block in: ${src}`);
+  }
+  // A real JSDoc must still be found.
+  assert.equal(parseJsDocBlocks('/** @param {Real} x */').length, 1);
+});
+
 test('parses template names', () => {
   const blocks = parseJsDocBlocks('/** @template T, U */');
   const template = blocks[0]?.tags.find((tag) => tag.tag === 'template');
