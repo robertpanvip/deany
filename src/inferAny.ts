@@ -2746,6 +2746,18 @@ function mergeEvidence(evidence: Evidence): {
   if (members.length === 0) {
     return { reason: 'contradictory constraints' };
   }
+  // `unknown` is TypeScript's top type: `unknown | T` collapses to `unknown`.
+  // When any covariant source is genuinely opaque (e.g. `return x()` against a
+  // bare `Function`, where the callee's result cannot be known at all), listing
+  // the sibling concrete members is a lie — it claims confidence we do not
+  // have (TS2322/TS2345 in strict mode once a caller relies on the narrow type).
+  // Collapse the whole union to `unknown`, so "cannot tell" never turns into a
+  // confident narrower type. This matches only the bare `unknown` member —
+  // `unknown[]`, `Array<unknown>`, `{ k: unknown }`, `=> unknown` etc. are
+  // distinct members and are never absorbed.
+  if (members.includes('unknown')) {
+    return { type: 'unknown', weak };
+  }
   if (members.length === 1) {
     const only = members[0];
     return only === undefined ? { reason: 'no usage evidence' } : { type: only, weak };

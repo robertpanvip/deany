@@ -398,3 +398,15 @@
 **验证**：7/7 收窄样例 strict 通过；全套测试 204→206（新增 4 项：concrete 分支不污染 Function、opaque return 不谎报×2 及 2.1/2.2 既有）；typecheck 干净；build 通过。
 
 样例与产物：`/workspace/deany-demo/narrowing/`；对比报告 `narrowing-report.html`。
+
+## 不可知调用结果收敛函数返回为 unknown（0.1.14）
+
+用户 review n1 收窄报告时指出：`typeof x === 'function'` 守卫内的 `return x()`，其 `x()` 返回值根本不可知，函数返回类型应当是 `unknown`，而非 `boolean | null | string | unknown`。
+
+**根因**：0.1.13 的 opaque-return 修复让 `return x()` 贡献了一条裸 `unknown` source（正确），但 `mergeEvidence` 在计算 `members` 后仅做去重排序、直接 `join(' | ')`，缺少顶层类型吸收——`unknown | T` 按 TS 语义恒等于 `unknown`，却被如实拼成了联合，等于对不可知的分支保留了"其余分支可知"的误导性信心。
+
+**修复**：`mergeEvidence` 在 `members` 非空后、单成员/联合分支之前，若 `members` 含裸 `unknown` 即返回 `{ type: 'unknown' }`。精确匹配裸 `unknown` 成员，`unknown[]`、`Array<unknown>`、`{k:unknown}`、`=>unknown` 等复合类型不受影响（它们是独立成员字符串）。
+
+**效果**：n1 返回 `unknown`（参数仍干净还原 `Function | boolean | number | string`）；连带 n4（`number|unknown`）、n5（`number|unknown`）同样收敛为 `unknown`，语义等价且更诚实。全套测试 206→207（新增 1 项：不可知调用结果收敛为裸 unknown，并断言不出现含 unknown 的联合），typecheck 干净，build 通过，7/7 收窄样例 strict 通过。
+
+样例与产物：`/workspace/deany-demo/narrowing/`；对比报告 `narrowing-report.html`（n1/n4/n5 产物已同步）。

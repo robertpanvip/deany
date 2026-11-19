@@ -209,3 +209,22 @@ function len(x) {
 `);
   assert.match(output, /function len\(x:.*\): (?:unknown|number \| unknown|unknown \| number)/);
 });
+
+test('an unknowable call result collapses the whole function return to bare unknown', () => {
+  // `typeof x === 'function'` narrows x to a bare Function; `x()` can return
+  // literally anything, so it is opaque/unknown. Because `unknown | T` is just
+  // `unknown`, the honest return type is `unknown` — NOT a misleading union
+  // like `boolean | null | string | unknown` that claims the other branches
+  // are knowable. The parameter must still recover its four clean members.
+  const output = convertJs(`
+function f(x) {
+  if (typeof x === 'string') return x.toUpperCase();
+  if (typeof x === 'number') return x.toFixed(2);
+  if (typeof x === 'boolean') return !x;
+  if (typeof x === 'function') return x();
+  return null;
+}
+`);
+  assert.match(output, /function f\(x: Function \| boolean \| number \| string\): unknown/);
+  assert.doesNotMatch(output, /\): (?:[^)]*\|[^)]*unknown|unknown \|)/);
+});
