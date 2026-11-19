@@ -378,9 +378,12 @@ export function constraintsFromReference(
         ? call.expression.getText(call.getSourceFile())
         : undefined;
     if (calleeText === 'Math.max' || calleeText === 'Math.min') {
+      // A real lib.d.ts rest signature (`...values: number[]`), not a guess.
       addConstraint(evidence, 'number[]');
     } else {
-      addConstraint(evidence, 'unknown[]');
+      // Spreading requires an Iterable, not an Array — a generator or Set is
+      // equally valid (Architecture review 1.6).
+      addConstraint(evidence, 'Iterable<unknown>');
     }
   }
 
@@ -514,31 +517,36 @@ export function constraintsFromReference(
     }
   }
 
-  // `for (const v of x)` -> x must be iterable. Normally the element type is
-  // `unknown` (the strict-safe stand-in). But if the loop body pins the element
-  // to a concrete primitive — e.g. `t += v` where `t` is a number, or `s += v`
-  // where `s` is a string — use that type so `v` stays usable and the loop body
-  // doesn't fail TS18046 after x was narrowed from `any` to an array. Otherwise
-  // the tool emits code its own strict gate rejects. A plain `void v` / bare
-  // use leaves the conservative `unknown[]`.
+  // `for (const v of x)` -> x must be ITERABLE, not necessarily an array.
+  // Emitting `T[]` used to reject originally-legal `for...of` inputs (Set,
+  // Generator, string). The loop body only proves the iteration *protocol* and,
+  // when it pins the element to a primitive (`t += v`), the element type —
+  // neither implies an array. `Iterable<T>` keeps the body type-checking while
+  // accepting every value the original JS accepted. (Architecture review 1.2/1.6.)
+  // The element match uses SYMBOL IDENTITY, not the binding's spelling: a nested
+  // same-named local (`() => { const v = 1; t += v; }`) must not be mistaken for
+  // the loop variable and pollute the element type. (Architecture review 1.4.)
   if (ts.isForOfStatement(parent) && parent.expression === reference) {
     let elementType = 'unknown';
     const initializer = parent.initializer;
     if (ts.isVariableDeclarationList(initializer) && initializer.declarations.length > 0) {
       const binding = initializer.declarations[0];
-      const loopVar =
-        binding !== undefined && ts.isIdentifier(binding.name) ? binding.name.text : undefined;
-      if (loopVar !== undefined) {
+      const loopVarSymbol =
+        binding !== undefined && ts.isIdentifier(binding.name)
+          ? ctx.checker.getSymbolAtLocation(binding.name)
+          : undefined;
+      if (loopVarSymbol !== undefined) {
         let concrete: string | undefined;
         const scanBody = (n: ts.Node): void => {
-          // `acc += v` / `v += acc`: the accumulator's checker type is the type
-          // v must be addable to. Use a primitive only when unambiguous.
+          // `acc += v` / `v += acc`: only count `v` if it resolves to the loop
+          // variable's symbol. A shadowed same-name identifier is a different
+          // symbol and must be ignored.
           if (
             ts.isBinaryExpression(n) &&
             (n.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken ||
               NUMERIC_COERCION_OPERATORS.has(n.operatorToken.kind)) &&
             ts.isIdentifier(n.right) &&
-            n.right.text === loopVar
+            ctx.checker.getSymbolAtLocation(n.right) === loopVarSymbol
           ) {
             const accType = widenedTypeText(ctx.checker, ctx.checker.getTypeAtLocation(n.left), n.left);
             if (accType === 'number' || accType === 'string') {
@@ -553,7 +561,15 @@ export function constraintsFromReference(
         }
       }
     }
-    addConstraint(evidence, `${elementType}[]`);
+    // `for await...of` accepts BOTH sync iterables and async iterables in JS.
+    // Emitting only Iterable<T> rejects an AsyncGenerator; only AsyncIterable<T>
+    // rejects an array. Their union preserves the original call range.
+    // (Architecture review 1.2.)
+    const protocol =
+      parent.awaitModifier !== undefined
+        ? `Iterable<${elementType}> | AsyncIterable<${elementType}>`
+        : `Iterable<${elementType}>`;
+    addConstraint(evidence, protocol);
   }
 
   // Destructuring: `const [a, b] = x` -> x is array-like; `const { foo } = x`
@@ -563,7 +579,9 @@ export function constraintsFromReference(
     parent.initializer === reference &&
     ts.isArrayBindingPattern(parent.name)
   ) {
-    addConstraint(evidence, 'unknown[]');
+    // Array destructuring requires an Iterable, not an Array (a Set or a
+    // generator can be destructured too). Use the protocol, not the concrete.
+    addConstraint(evidence, 'Iterable<unknown>');
   }
   if (
     ts.isVariableDeclaration(parent) &&
@@ -597,12 +615,14 @@ export function constraintsFromReference(
     }
   }
 
-  // `await x` -> x is thenable. It is a constraint, not a source: `await` also
-  // accepts plain values, but a binding seen only here is most likely a
-  // Promise, and a concrete source still overrides this.
-  if (ts.isAwaitExpression(parent) && parent.expression === reference) {
-    addConstraint(evidence, 'PromiseLike<unknown>');
-  }
+  // `await x` proves almost nothing about x: JavaScript's await accepts any
+  // value (numbers, strings, plain objects, thenables alike). Emitting a
+  // `PromiseLike<unknown>` constraint here used to narrow `f(value: any)` where
+  // the body is just `await value` to `PromiseLike<unknown>`, rejecting the
+  // originally-legal `f(123)` / `f('hello')`. Since every value is awaitable,
+  // this usage yields no usable protocol constraint — deliberately emit none,
+  // so the binding keeps `any`/`unknown` unless stronger evidence exists.
+  // (Architecture review 1.1 / "Usage Protocol".)
 
   // `x || fallback` / `x ?? fallback` -> the fallback's type is an observed
   // value for x (a common "default value" idiom, so x likely shares it).
@@ -666,7 +686,7 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0
   if (ctx.dtsProviders !== undefined) {
     const sourceFile = owner.getSourceFile();
     const provider = sourceFile === undefined ? undefined : ctx.dtsProviders.get(sourceFile.fileName);
-    const declared = declaredTypeOf(owner, provider);
+    const declared = declaredTypeOf(owner, provider, ctx.checker);
     if (declared !== undefined) {
       addSource(evidence, declared);
       return evidence;

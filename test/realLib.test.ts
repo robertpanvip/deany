@@ -305,12 +305,17 @@ function d(x: any) { const { foo, bar } = x; return foo; }
   assert.match(output, /x: \{ (bar|foo): unknown; (bar|foo): unknown; \}/);
 });
 
-test('await operand infers a thenable', () => {
+test('await operand stays un-narrowed: every value is awaitable', () => {
+  // Architecture review 1.1: `await` accepts plain values too, so it proves no
+  // protocol. Emitting `PromiseLike<unknown>` used to reject legal `a(123)` /
+  // `a('x')`. Keeping `any` preserves the original call range.
   const output = inferTs(`
 async function a(x: any) { return await x; }
 `);
-  assert.match(output, /x: (PromiseLike<unknown>|Promise<unknown>|unknown)/);
-  assert.doesNotMatch(output, /x: any/);
+  assert.match(output, /x: any/);
+  assert.doesNotMatch(output, /x: PromiseLike/);
+  const strict = checkStrict('case.ts', output + '\na(123); a("x"); a(Promise.resolve(1));\n');
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
 
 test('logical fallback and ternary branches infer a union', () => {

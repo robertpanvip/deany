@@ -324,7 +324,28 @@ export function mergeEvidence(evidence: Evidence): {
     }
   } else if (allowed !== undefined && allowed.length > 0) {
     // No observed values: the required argument types are our best estimate.
-    members = allowed;
+    // Exception: a pure iteration *protocol* constraint (Iterable<T>, emitted
+    // by for-of / destructuring / spread) must not mask concrete Array
+    // structure evidence from iteration methods (`.map`, `.filter`, ...).
+    // Those methods do not exist on Iterable, so emitting only Iterable<T>
+    // would make the very body we inspected fail TS2339. Prefer the array
+    // shape in that case. (Architecture review 1.6.)
+    const onlyProtocolConstraint = allowed.every(
+      (member) => member.startsWith('Iterable<') || member.startsWith('AsyncIterable<'),
+    );
+    const hasIterationMethod = [...evidence.properties.keys()].some((key) =>
+      ITERATION_METHODS.has(key),
+    );
+    if (
+      onlyProtocolConstraint &&
+      hasIterationMethod &&
+      evidence.elementShape.children.size > 0
+    ) {
+      members = [`Array<${renderShapeNode(evidence.elementShape)}>`];
+      weak = true;
+    } else {
+      members = allowed;
+    }
   } else if (
     evidence.elementShape.children.size > 0 &&
     [...evidence.properties.keys()].every((key) => ITERATION_METHODS.has(key))

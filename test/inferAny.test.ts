@@ -972,12 +972,17 @@ test('early return with an implicit undefined path includes undefined in the ret
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
 
-test('for-of element type is inferred from the loop body so the body type-checks', () => {
-  // Regression (P0-3): narrowing `list: any` to an array must not leave the
-  // loop variable `unknown` and break `t += v` (TS18046).
+test('for-of yields an Iterable protocol (element type from body), not an array', () => {
+  // P0-3: the loop body pins the element to `number` so `t += v` type-checks.
+  // Architecture review 1.2/1.6: `for...of` only proves Iterable — emitting
+  // `number[]` used to reject legal `Set`/Generator/string inputs.
   const { output } = infer(`function total(list: any) { let t = 0; for (const v of list) { t += v; } return t; }\n`);
-  assert.match(output, /list: number\[\]/);
-  const strict = checkStrict('case.ts', output);
+  assert.match(output, /list: Iterable<number>/);
+  assert.doesNotMatch(output, /list: number\[\]/);
+  const strict = checkStrict(
+    'case.ts',
+    output + '\ntotal([1,2]); total(new Set([1,2])); total((function*(){yield 1;})());\n',
+  );
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
 
@@ -1169,4 +1174,123 @@ reg((z) => z + 1);
 `);
   assert.match(output, /constructor\(x: number\)/);
   assert.match(output, /cb: \( z: number \) => unknown/);
+});
+
+// --- Architecture review part 1: Usage Protocol vs concrete types ----------
+// Principle: an automatic type-recovery tool must not NARROW the set of calls
+// the original JavaScript accepted. These tests pin that a usage which only
+// proves a protocol (iterable / awaitable) never collapses to a concrete type
+// (array / PromiseLike).
+
+test('arch1: await operand stays any so plain values and promises are both accepted', () => {
+  const { output } = infer(`async function getValue(value: any) { return await value; }\n`);
+  assert.match(output, /value: any/);
+  assert.doesNotMatch(output, /PromiseLike/);
+  const strict = checkStrict(
+    'case.ts',
+    output + '\ngetValue(123); getValue("hello"); getValue(Promise.resolve(123));\n',
+  );
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('arch1: for-of infers Iterable<T>, accepting Set and Generator', () => {
+  const { output } = infer(
+    `export function sum(values: any) { let total = 0; for (const value of values) { total += value; } return total; }\n`,
+  );
+  assert.match(output, /values: Iterable<number>/);
+  assert.doesNotMatch(output, /values: number\[\]/);
+  const strict = checkStrict(
+    'case.ts',
+    output + '\nsum([1,2]); sum(new Set([1,2])); sum((function*(){yield 1;yield 2;})());\n',
+  );
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('arch1: for-of element inference uses symbol identity, not variable name', () => {
+  // A nested same-named local (`const value = 1; total += value`) must NOT be
+  // mistaken for the loop variable and pin the element type to number.
+  const { output } = infer(`
+function process(values: any) {
+  let total = 0;
+  for (const value of values) {
+    (() => { const value = 1; total += value; })();
+  }
+  return total;
+}
+`);
+  assert.match(output, /values: Iterable<unknown>/);
+  assert.doesNotMatch(output, /values: Iterable<number>/);
+});
+
+test('arch1: array destructuring infers Iterable, accepting Set', () => {
+  const { output } = infer(`export function firstOf(value: any) { const [first] = value; return first; }\n`);
+  assert.match(output, /value: Iterable<unknown>/);
+  const strict = checkStrict('case.ts', output + '\nfirstOf(new Set([1])); firstOf([1,2]);\n');
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('arch1: spread infers Iterable, accepting Generator', () => {
+  const { output } = infer(`export function collect(value: any) { return [...value]; }\n`);
+  assert.match(output, /value: Iterable<unknown>/);
+  const strict = checkStrict(
+    'case.ts',
+    output + '\ncollect((function*(){yield 1;})()); collect(new Set([1]));\n',
+  );
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('arch1: a sibling .d.ts does not apply to a private same-named inner function', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'arch1-dts-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(
+    api,
+    `export function process(value: any) { return value.length; }\nfunction internal() { function process(value: any) { return value.toFixed(2); } return process(123); }\n`,
+    'utf8',
+  );
+  fs.writeFileSync(dts, `export declare function process(value: string): number;\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const out = results.find((r) => r.fileName === api)?.output ?? '';
+    assert.match(out, /export function process\(value: string\)/); // exported: d.ts wins
+    assert.match(out, /function process\(value: number\)/); // private inner: own inference
+    assert.doesNotMatch(out, /function internal\(\) \{ function process\(value: string\)/);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('arch1: constructor of an exported class keeps its public parameter type', () => {
+  // The constructor is public API; internal `new Client('hello')` must not
+  // narrow `value: any` to string (S4 protection extends to constructors).
+  const { output } = infer(`export class Client { constructor(value: any) { this.v = value; } v: any; }\nnew Client('hello');\n`);
+  assert.match(output, /constructor\(value: any\)/);
+});
+
+test('arch1: a private constructor is not treated as public API', () => {
+  const { output } = infer(`export class Client { private constructor(value: any) { this.v = value; } v: any; static make(){ return new Client('x'); } }\n`);
+  // Private constructors are internal; narrowing from the internal call is fine.
+  assert.match(output, /private constructor\(value: string\)/);
+});
+
+test('arch1: for-await-of yields Iterable|AsyncIterable, accepting async and sync sources', () => {
+  // `for await...of` accepts both sync iterables and async iterables in JS.
+  // Accepting only one side would reject legal calls (AsyncGenerator or array).
+  const { output } = infer(
+    `async function consume(xs: any) { for await (const x of xs) { } }\n`,
+  );
+  assert.match(output, /Iterable<unknown>/);
+  assert.match(output, /AsyncIterable<unknown>/);
+  const strict = checkStrict(
+    'case.ts',
+    output + '\nasync function* gen(){ yield 1; }\nconsume(gen()); consume([1,2]); consume(new Set([1]));\n',
+  );
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('arch1: iteration methods (.map) keep an Array despite a for-of protocol', () => {
+  // `.map()` requires Array (not on Iterable). A for-of constraint must not
+  // mask the Array structure evidence, or the body fails TS2339.
+  const { output } = infer(`function f(xs: any) { for (const x of xs) {} return xs.map(v => v.id); }\n`);
+  assert.match(output, /Array<\{ id: unknown; \}>/);
 });

@@ -103,6 +103,7 @@ export function isExportedParameter(
 export function declaredTypeOf(
   owner: ts.Node,
   provider: DeclarationProvider | undefined,
+  checker?: ts.TypeChecker,
 ): string | undefined {
   if (provider === undefined) {
     return undefined;
@@ -111,6 +112,14 @@ export function declaredTypeOf(
   // the parameter owners; here we cover return types and variables/members.
   if (ts.isParameter(owner)) {
     const fn = owner.parent;
+    // A sibling `.d.ts` describes the MODULE'S PUBLIC CONTRACT. A private,
+    // same-named inner function (`function internal(){ function process(){} }`)
+    // is not that contract, so a name match alone must not apply its signature.
+    // Gate on export status (symbol-backed) before consulting the d.ts.
+    // (Architecture review 1.3.)
+    if (checker !== undefined && !isExportedDeclaration(fn, checker)) {
+      return undefined;
+    }
     const fnName = functionName(fn);
     if (fnName === undefined) {
       return undefined;
@@ -144,8 +153,11 @@ export function declaredTypeOf(
 
   // Function-like owner: the `any` may be its return-type annotation. Only use
   // the d.ts return type when the owner has a concrete name (avoid guessing for
-  // anonymous callbacks).
+  // anonymous callbacks) and is actually exported (see the parameter branch).
   if (isFunctionLikeNode(owner)) {
+    if (checker !== undefined && !isExportedDeclaration(owner, checker)) {
+      return undefined;
+    }
     const fnName = functionName(owner);
     if (fnName === undefined) {
       return undefined;
@@ -205,7 +217,13 @@ function declarationName(node: ts.Node): ts.Node | undefined {
 
 /** Walk from a parameter/expression to the declaration that carries export info. */
 function declarationTarget(node: ts.Node): ts.Node | undefined {
-  if (ts.isParameter(node) || isClassMember(node) || isFunctionLikeNode(node)) {
+  if (
+    ts.isParameter(node) ||
+    isClassMember(node) ||
+    isFunctionLikeNode(node) ||
+    ts.isClassDeclaration(node) ||
+    ts.isClassExpression(node)
+  ) {
     return node;
   }
   return undefined;
@@ -237,12 +255,18 @@ function isFunctionLikeNode(node: ts.Node): node is ts.SignatureDeclaration {
 
 function isClassMember(
   node: ts.Node,
-): node is ts.MethodDeclaration | ts.PropertyDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration {
+): node is ts.MethodDeclaration | ts.PropertyDeclaration | ts.GetAccessorDeclaration | ts.SetAccessorDeclaration | ts.ConstructorDeclaration {
   return (
     ts.isMethodDeclaration(node) ||
     ts.isPropertyDeclaration(node) ||
     ts.isGetAccessorDeclaration(node) ||
-    ts.isSetAccessorDeclaration(node)
+    ts.isSetAccessorDeclaration(node) ||
+    // A constructor of an exported class is public API: its parameter types
+    // form the construction contract for external callers, so S4 must protect
+    // them from internal `new C(...)` call-site narrowing. Private/protected
+    // constructors are filtered out by the modifier check in the caller.
+    // (Architecture review 2.5.)
+    ts.isConstructorDeclaration(node)
   );
 }
 
