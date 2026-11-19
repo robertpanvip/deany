@@ -900,10 +900,13 @@ test('generic parameter default/constraint never gets the owner whole type', () 
 export function withDefault<T = any>(v: T) {}
 export function withConstraint<T extends any>(v: T) {}
 `);
-  assert.match(output, /withDefault<T = unknown>/);
-  assert.match(output, /withConstraint<T extends unknown>/);
-  assert.doesNotMatch(output, /<T = (?!unknown)/);
-  assert.doesNotMatch(output, /extends T>/);
+  // Naming-agnostic: match any type-parameter name, not a hard-coded `T`.
+  assert.match(output, /withDefault<\s*\w+\s*=\s*unknown\s*>/);
+  assert.match(output, /withConstraint<\s*\w+\s+extends\s+unknown\s*>/);
+  // Guard against a non-unknown default/constraint slipping back in (void/any/...) —
+  // also naming-agnostic, so renaming the parameter cannot defeat them.
+  assert.doesNotMatch(output, /<\s*\w+\s*=\s*(?!unknown\b)\w+/);
+  assert.doesNotMatch(output, /\bextends\s+(?!unknown\b)\w+\s*>/);
 });
 
 test('tuple element any is projected to the element slot, not the whole tuple', () => {

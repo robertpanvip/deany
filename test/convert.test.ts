@@ -287,7 +287,6 @@ declare function g(a: string): void;
   const { output, diagnostics } = convertSource('decl.js', source, { banner: false });
   assert.equal(diagnostics.length, 0);
   assert.doesNotMatch(output, /:\s*unknown\s*:/);
-  assert.doesNotMatch(output, /:\s*unknown\s*:/);
   assert.match(output, /declare const X: number;/);
   assert.match(output, /bar\(\): void;/);
   assert.match(output, /declare function g\(a: string\): void;/);
@@ -354,7 +353,9 @@ const r = make(1)(2)(3);
 `;
   const output = convertJsWithResolver('curry.js', source);
   assert.match(output, /make\(a: number\): \(arg0: number\) => \(arg0: number\) => number/);
-  assert.doesNotMatch(output, /=> unknown =>/);
+  // The old `/=> unknown =>/` missed the real regression, which emitted a
+  // colon-form `: unknown` on inner arrows: `(b: number): unknown => ...`.
+  assert.doesNotMatch(output, /:\s*unknown\b/);
   assert.equal(checkStrict('curry.ts', output).ok, true);
 });
 
@@ -412,6 +413,9 @@ test('a UTF-8 BOM does not skew annotation offsets', () => {
   assert.equal(output.charCodeAt(0) === 0xfeff, false, 'BOM should be stripped');
   assert.match(output, /const a: number = 1;/);
   assert.match(output, /function f\(x: string\): string/);
-  assert.doesNotMatch(output, /:\s*\w+\s+\w+[:=]/); // no `numbera` / `stringx` skew
+  // The old `/:\s*\w+\s+\w+[:=]/` never matched the real skew (`const : numbera`
+  // / `f(: stringx)`). Detect the actual symptom: a colon where an identifier
+  // should be — right after a decl keyword or an opening paren.
+  assert.doesNotMatch(output, /(?:\b(?:const|let|var)\s*:|\(\s*:)/);
   assert.equal(checkStrict('bom.ts', output).ok, true);
 });

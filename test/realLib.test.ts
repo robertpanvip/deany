@@ -131,7 +131,10 @@ test('new on an any parameter infers a construct signature', () => {
   const output = inferTs(`
 function create(Ctor: any) { return new Ctor(); }
 `);
-  assert.doesNotMatch(output, /Ctor: unknown/);
+  // Must positively lock the construct signature, not just ban `Ctor: unknown`:
+  // the old negative-only assertion let `Ctor: any` / `Function` / `object` slip
+  // through while strict still passed.
+  assert.match(output, /Ctor: new \(\.\.\.args: unknown\[\]\) => unknown/);
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
@@ -722,7 +725,7 @@ const s = new Set();
 `);
   assert.match(output, /Map<unknown, unknown>/);
   assert.match(output, /Set<unknown>/);
-  assert.doesNotMatch(output, /<any|any>/);
+  assert.doesNotMatch(output, /\bany\b/);
   const strict = checkStrict('case.ts', output);
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
