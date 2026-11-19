@@ -381,3 +381,20 @@
 **2.3（递归）/ 2.4 的 `+`**：与 0.1.2 一致，属正确取舍。引擎只向前迭代、不假设函数自身签名，递归自调用不构成返回值证据；`+` 无证据时可能是字符串拼接，保持 unknown 是"不臆测"的正确表现。
 
 **文档**：README 补 `convertSource(fileName, source, options, resolver?)` 的醒目说明——第 4 个 resolver 省略时所有使用证据推断（赋值/调用点/算术/容器变异/收窄）全部关闭，无 JSDoc 声明一律退化 `unknown`（CLI 自动构建 resolver 不受影响）；示例改为正确传 `createUsageResolver`。容器变异章节补无注解 Map/Set 反推样例。
+
+## 收窄专项复核 + 两处修复（0.1.13）
+
+用户要求看 typeof / instanceof 等收窄效果，写 7 组真实样例（n1~n7）实测，发现并修复两处缺陷。
+
+**缺陷 A — 具体类型守卫内的成员调用污染 memberless 分支（n1）**：
+`function f(x){ if(typeof x==='string') return x.toUpperCase(); if(typeof x==='number') return x.toFixed(2); if(typeof x==='function') return x(); }`
+原产物 `x: (Function & {toUpperCase;toFixed}) | boolean | number | string`。根因：`constraintsFromReference` 里 `controlFlowNarrowedType` 已把各分支正确收窄成 string/number，但这些成员访问名又被全局收进 `evidence.properties`，`mergeEvidence` 再把它们相交到 memberless 的 `Function` source 上。修复：新增 `narrowedToConcrete` 判定（收窄到具体类型且非 memberless/数组时），在此类站点跳过全局属性形状收集——具体类型自带这些方法，无需补形状；memberless/opaque 收窄保留（`object & {foo}` 的唯一证据）。结果 `x: Function | boolean | number | string`，干净。注意验证时须 `npm run build`，CLI 走 dist 而非 src（曾因未重建误判为未修复）。
+
+**缺陷 B — opaque return 使函数返回类型谎报为过窄（n3 Array.isArray / n4 in）**：
+`function f(x){ if(Array.isArray(x)) return x[0]; return x; }` 原返回类型 `Array<number>|unknown[]`，但函数体真 return 了 opaque 的 `x[0]` → TS2322。根因：return 收集处 `typeText(x[0])` 返回 undefined（x 仍隐式 any），该分支被静默丢弃，只剩其它具体 return 定义返回类型。修复：opaque return 贡献 `unknown` source，返回类型诚实包含 unknown（"推不出"不等于"确定的窄类型"）。结果 n3 返回 `unknown`、n4 返回 `number|unknown`，strict 均 0。
+
+**判定为设计取舍、未改代码**：n6 样例若让同一参数同时被 `typeof x==='string'` 与 `x>0` 约束，强证据 number 会把 string 分支压成 never（TS2339）——这是"关系运算强证据 > typeof 弱证据"的既定取舍，重写样例为真值自洽的三元/短路后干净通过。
+
+**验证**：7/7 收窄样例 strict 通过；全套测试 204→206（新增 4 项：concrete 分支不污染 Function、opaque return 不谎报×2 及 2.1/2.2 既有）；typecheck 干净；build 通过。
+
+样例与产物：`/workspace/deany-demo/narrowing/`；对比报告 `narrowing-report.html`。

@@ -560,6 +560,23 @@ function handle(x: any) {
   assert.match(output, /function handle\(x: \(Box \| unknown\[\]\)\)/);
 });
 
+test('member calls in concrete typeof branches do not pollute a sibling Function member', () => {
+  // Each guard narrows x to a concrete type that already owns the called
+  // method (string.toUpperCase, number.toFixed). Those method names must not
+  // be collected into the shared property shape and then intersected onto the
+  // memberless `Function` source from `typeof x === 'function'`.
+  const { output } = infer(`
+function f(x: any) {
+  if (typeof x === 'string') return x.toUpperCase();
+  if (typeof x === 'number') return x.toFixed(2);
+  if (typeof x === 'function') return x();
+  return null;
+}
+`);
+  assert.match(output, /function f\(x: \(?Function \| number \| string\)?\)/);
+  assert.doesNotMatch(output, /Function & \{/);
+});
+
 test('back-propagates an instanceof parameter type through a chained variable', () => {
   const { output } = infer(`
 class Box { v = 1; }

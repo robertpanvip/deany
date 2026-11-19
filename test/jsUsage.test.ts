@@ -186,3 +186,26 @@ function add(a, b) { return a + b; }
 `);
   assert.match(output, /function add\(a: unknown, b: unknown\): unknown/);
 });
+
+test('an opaque return branch keeps the function return unknown, not a lie', () => {
+  // `return x[0]` is opaque while x is implicit any. Dropping that branch
+  // would let `return x` define an over-narrow return type, which strict mode
+  // rejects (TS2322) because the opaque element is really returned.
+  const output = convertJs(`
+function head(x) {
+  if (Array.isArray(x)) return x[0];
+  return x;
+}
+`);
+  assert.match(output, /function head\(x: (?:Array<number> \| unknown\[\]|unknown\[\])\): unknown/);
+});
+
+test('opaque in-operator return widens the function return instead of narrowing', () => {
+  const output = convertJs(`
+function len(x) {
+  if ('length' in x) return x.length;
+  return 0;
+}
+`);
+  assert.match(output, /function len\(x:.*\): (?:unknown|number \| unknown|unknown \| number)/);
+});

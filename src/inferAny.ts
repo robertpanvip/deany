@@ -1592,7 +1592,21 @@ function constraintsFromReference(
   // from the compiler's own flow analysis and covers guard shapes the syntactic
   // typeof/instanceof/isArray rules cannot see (truthiness, switch, negated
   // guards, custom predicates). Opaque / non-narrowing results are dropped.
-  addSource(evidence, controlFlowNarrowedType(reference, ctx));
+  const flowNarrowed = controlFlowNarrowedType(reference, ctx);
+  addSource(evidence, flowNarrowed);
+  // When the checker has narrowed this reference to a *concrete* type (e.g.
+  // `string` under `typeof x === 'string'`, or a class under `instanceof`),
+  // member accesses on it belong to that concrete type — `string` already has
+  // `toUpperCase`, `Foo` already has `bar`. Recording those member names in the
+  // global property shape would let mergeEvidence intersect them onto an
+  // unrelated memberless source from a sibling branch (e.g. turning `Function`
+  // into `Function & { toUpperCase; toFixed }`). Only memberless / opaque
+  // narrowings need the member shape as the sole evidence of the object's
+  // members, so skip global shape collection for concrete narrowing sites.
+  const narrowedToConcrete =
+    flowNarrowed !== undefined &&
+    !MEMBERLESS_OBJECT_SOURCES.has(flowNarrowed) &&
+    !isArrayTypeString(flowNarrowed);
 
   // `const { a, b } = x` / `const { a } = x`: the binding elements pulled out of
   // `x` are real evidence for `x`'s shape. Each element is inferred on its own
@@ -1681,71 +1695,78 @@ function constraintsFromReference(
 
     const isMethodCall =
       ts.isCallExpression(grandparent) && grandparent.expression === parent;
-    // `obj.field = expr`: the checker reports `any` for the read of a field
-    // not yet present on an evolving object literal, but the RHS carries the
-    // real type. Use it so the synthesized shape records the written value.
-    const isPropertyWrite =
-      ts.isBinaryExpression(grandparent) &&
-      grandparent.left === parent &&
-      grandparent.operatorToken.kind === ts.SyntaxKind.EqualsToken;
-    const METHOD_TYPE = '(...args: unknown[]) => unknown';
-    const previous = evidence.properties.get(parent.name.text);
-    if (isMethodCall || previous === METHOD_TYPE) {
-      evidence.properties.set(parent.name.text, METHOD_TYPE);
-      // Record the contextual (expected) return type of the call, so the
-      // lib-unique narrowing can verify the method's signature matches the
-      // builtin. `getContextualType` yields number/string for annotated returns
-      // and variable declarations, but nothing for bare/chained calls — those
-      // stay unconstrained and still allow the weak narrowing.
-      if (isMethodCall) {
-        const contextual = ctx.checker.getContextualType(grandparent as ts.CallExpression);
-        if (contextual !== undefined) {
-          const text = ctx.checker.typeToString(contextual);
-          const list = evidence.methodReturnTypes.get(parent.name.text) ?? [];
-          if (!list.includes(text)) {
-            list.push(text);
-          }
-          evidence.methodReturnTypes.set(parent.name.text, list);
-          // If the observed return context contradicts the builtin method's
-          // real return type, this is NOT the builtin method (it is a custom
-          // same-named method). Replace the generic METHOD_TYPE with a
-          // signature returning the observed type: this both blocks the weak
-          // narrowing (value is no longer METHOD_TYPE) and keeps the call
-          // type-correct under strict mode (return is `text`, not `unknown`).
-          const builtinReturn = BUILTIN_METHOD_RETURN.get(parent.name.text);
-          if (
-            builtinReturn !== undefined &&
-            !VAGUE_RETURN_TYPES.has(text) &&
-            text !== builtinReturn
-          ) {
-            evidence.properties.set(parent.name.text, `(...args: unknown[]) => ${text}`);
+    // Concrete-narrowed member accesses belong to the already-known concrete
+    // type (string/number/class), so recording them globally would intersect
+    // their members onto an unrelated memberless sibling source. Skip shape
+    // collection at such sites; memberless/opaque narrowings still need it as
+    // their only evidence of the binding's members.
+    if (!narrowedToConcrete) {
+      // `obj.field = expr`: the checker reports `any` for the read of a field
+      // not yet present on an evolving object literal, but the RHS carries the
+      // real type. Use it so the synthesized shape records the written value.
+      const isPropertyWrite =
+        ts.isBinaryExpression(grandparent) &&
+        grandparent.left === parent &&
+        grandparent.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+      const METHOD_TYPE = '(...args: unknown[]) => unknown';
+      const previous = evidence.properties.get(parent.name.text);
+      if (isMethodCall || previous === METHOD_TYPE) {
+        evidence.properties.set(parent.name.text, METHOD_TYPE);
+        // Record the contextual (expected) return type of the call, so the
+        // lib-unique narrowing can verify the method's signature matches the
+        // builtin. `getContextualType` yields number/string for annotated returns
+        // and variable declarations, but nothing for bare/chained calls — those
+        // stay unconstrained and still allow the weak narrowing.
+        if (isMethodCall) {
+          const contextual = ctx.checker.getContextualType(grandparent as ts.CallExpression);
+          if (contextual !== undefined) {
+            const text = ctx.checker.typeToString(contextual);
+            const list = evidence.methodReturnTypes.get(parent.name.text) ?? [];
+            if (!list.includes(text)) {
+              list.push(text);
+            }
+            evidence.methodReturnTypes.set(parent.name.text, list);
+            // If the observed return context contradicts the builtin method's
+            // real return type, this is NOT the builtin method (it is a custom
+            // same-named method). Replace the generic METHOD_TYPE with a
+            // signature returning the observed type: this both blocks the weak
+            // narrowing (value is no longer METHOD_TYPE) and keeps the call
+            // type-correct under strict mode (return is `text`, not `unknown`).
+            const builtinReturn = BUILTIN_METHOD_RETURN.get(parent.name.text);
+            if (
+              builtinReturn !== undefined &&
+              !VAGUE_RETURN_TYPES.has(text) &&
+              text !== builtinReturn
+            ) {
+              evidence.properties.set(parent.name.text, `(...args: unknown[]) => ${text}`);
+            }
           }
         }
+      } else if (isPropertyWrite) {
+        evidence.properties.set(
+          parent.name.text,
+          typeText(ctx, (grandparent as ts.BinaryExpression).right) ?? 'unknown',
+        );
+      } else {
+        evidence.properties.set(parent.name.text, typeText(ctx, parent) ?? 'unknown');
       }
-    } else if (isPropertyWrite) {
-      evidence.properties.set(
-        parent.name.text,
-        typeText(ctx, (grandparent as ts.BinaryExpression).right) ?? 'unknown',
-      );
-    } else {
-      evidence.properties.set(parent.name.text, typeText(ctx, parent) ?? 'unknown');
-    }
 
-    // `if (Array.isArray(xs)) { xs.custom(cb) }`: a custom method called on a
-    // narrowed array is a real member of that value. Record a typed signature
-    // (building the callback's element shape from what its body accesses) so
-    // both `xs.custom(...)` and the callback body type-check. Standard Array
-    // members are excluded — they carry no information about a custom shape.
-    if (
-      isMethodCall &&
-      ts.isIdentifier(reference) &&
-      !ARRAY_BUILTIN_MEMBERS.has(parent.name.text) &&
-      isUnderArrayIsArrayGuard(reference, ctx)
-    ) {
-      evidence.arrayOwnMethods.set(
-        parent.name.text,
-        customArrayMethodSignature(grandparent as ts.CallExpression, ctx),
-      );
+      // `if (Array.isArray(xs)) { xs.custom(cb) }`: a custom method called on a
+      // narrowed array is a real member of that value. Record a typed signature
+      // (building the callback's element shape from what its body accesses) so
+      // both `xs.custom(...)` and the callback body type-check. Standard Array
+      // members are excluded — they carry no information about a custom shape.
+      if (
+        isMethodCall &&
+        ts.isIdentifier(reference) &&
+        !ARRAY_BUILTIN_MEMBERS.has(parent.name.text) &&
+        isUnderArrayIsArrayGuard(reference, ctx)
+      ) {
+        evidence.arrayOwnMethods.set(
+          parent.name.text,
+          customArrayMethodSignature(grandparent as ts.CallExpression, ctx),
+        );
+      }
     }
   }
 
@@ -2395,10 +2416,16 @@ function collectEvidence(owner: ts.Node, ctx: InferenceContext): Evidence {
       }
       if (ts.isReturnStatement(node) && node.expression !== undefined) {
         hasValueReturn = true;
-        addSource(
-          evidence,
-          typeText(ctx, node.expression) ?? arithmeticNumberType(ctx, node.expression),
-        );
+        const returned =
+          typeText(ctx, node.expression) ?? arithmeticNumberType(ctx, node.expression);
+        // An opaque returned expression (e.g. `return x[0]` / `return x.length`
+        // while `x` is still implicit any) yields no type text. Dropping that
+        // branch would let the *other* concrete returns define the function's
+        // annotated return type, which strict mode then rejects as too narrow
+        // (TS2322/TS2345) because the opaque value is really returned. Contribute
+        // `unknown` so the function's return is the honest union of all branches
+        // — "cannot tell" must not turn into a confident narrower type.
+        addSource(evidence, returned ?? 'unknown');
       }
       ts.forEachChild(node, visit);
     };
