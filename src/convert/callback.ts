@@ -15,10 +15,14 @@ import type { FunctionLikeNode } from './astUtil.js';
  */
 export function callbackReceiverHasJSDocType(
   node: FunctionLikeNode,
+  resolver: UsageResolver | undefined,
   sourceFile: ts.SourceFile,
   source: string,
   blocks: readonly JsDocBlock[],
 ): boolean {
+  if (resolver === undefined) {
+    return false;
+  }
   let call: ts.Node | undefined = node.parent;
   while (call !== undefined && !ts.isCallExpression(call)) {
     call = call.parent;
@@ -34,11 +38,21 @@ export function callbackReceiverHasJSDocType(
   if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression)) {
     return false;
   }
-  const receiverName = callee.expression.text;
+  const receiver = callee.expression;
+  const receiverName = receiver.text;
+  // Compare by symbol identity, not by spelling. The checker resolves
+  // shadowing, same-named parameters in sibling scopes, closures and import
+  // aliases for us; matching `declName.text === receiverName` can latch onto a
+  // same-named declaration elsewhere in the file and wrongly skip callback
+  // annotation (leaving `x` an implicit any).
+  const receiverSymbol = resolver.symbolOf(receiver);
+  if (receiverSymbol === undefined) {
+    return false;
+  }
 
-  // Find the receiver's declaration (parameter or variable) in the file by
-  // name, then check whether it carries a JSDoc that yields an array/object
-  // type after conversion.
+  // Find the receiver's actual declaration (parameter or variable) by symbol,
+  // then check whether it carries a JSDoc yielding an array type after
+  // conversion.
   let found = false;
   const visit = (n: ts.Node): void => {
     if (found) return;
@@ -46,7 +60,7 @@ export function callbackReceiverHasJSDocType(
     if ((ts.isParameter(n) || ts.isVariableDeclaration(n)) && ts.isIdentifier(n.name)) {
       declName = n.name;
     }
-    if (declName !== undefined && declName.text === receiverName) {
+    if (declName !== undefined && resolver.symbolOf(declName) === receiverSymbol) {
       // For a parameter, its JSDoc `@param` lives on the enclosing function;
       // for a variable, the `@type` tag lives on the declaration itself.
       let doc = leadingJsDoc(n, sourceFile, source, blocks);
@@ -99,7 +113,7 @@ export function annotateImplicitAnyCallback(
   // here would override that and break strict mode (TS18046/TS2322). The
   // checker cannot see this because it reads the pre-conversion source, so
   // detect the JSDoc-typed receiver from the AST instead.
-  if (callbackReceiverHasJSDocType(node, sourceFile, source, blocks)) {
+  if (callbackReceiverHasJSDocType(node, resolver, sourceFile, source, blocks)) {
     return;
   }
   const toAnnotate = node.parameters.filter(

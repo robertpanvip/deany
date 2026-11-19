@@ -1,6 +1,7 @@
 import * as ts from 'typescript';
 
 import type { InferenceContext, InferenceTable } from './types.js';
+import { MAX_FIXED_POINT_ROUNDS } from './state.js';
 import { isFunctionLike } from './util.js';
 import { mergeEvidence } from './shape.js';
 import { collectEvidence } from './evidence.js';
@@ -27,8 +28,11 @@ export function ownerType(table: InferenceTable, owner: ts.Node): string | undef
  * previous round — can refine it. Converges in at most MAX_ROUNDS rounds.
  */
 export function buildInferenceTable(owners: readonly ts.Node[], ctx: InferenceContext): InferenceTable {
-  const MAX_ROUNDS = 16;
-  for (let round = 0; round < MAX_ROUNDS; round += 1) {
+  const maxRounds = MAX_FIXED_POINT_ROUNDS;
+  let rounds = 0;
+  let converged = true;
+  for (let round = 0; round < maxRounds; round += 1) {
+    rounds = round + 1;
     let changed = false;
     for (const owner of owners) {
       const current = ownerType(ctx.table, owner);
@@ -55,8 +59,16 @@ export function buildInferenceTable(owners: readonly ts.Node[], ctx: InferenceCo
       changed = true;
     }
     if (!changed) {
+      converged = true;
       break;
     }
+    // Still changing on the last allowed round -> the chain did not settle.
+    if (round === maxRounds - 1) {
+      converged = false;
+    }
   }
+  ctx.table.diagnostics.rounds = rounds;
+  ctx.table.diagnostics.converged = converged;
+  ctx.table.diagnostics.maxRounds = maxRounds;
   return ctx.table;
 }

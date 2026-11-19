@@ -5,6 +5,9 @@ import * as path from 'node:path';
 import { test } from 'node:test';
 import * as ts from 'typescript';
 import { inferAnyInProject } from '../src/inferAny.js';
+import { buildInferenceTable } from '../src/inferAny/table.js';
+import { createContext, createTable, MAX_FIXED_POINT_ROUNDS } from '../src/inferAny/state.js';
+import { collectAnyOwners } from '../src/inferAny/collect.js';
 
 const compilerOptions: ts.CompilerOptions = {
   strict: true,
@@ -907,6 +910,33 @@ export function withConstraint<T extends any>(v: T) {}
   // also naming-agnostic, so renaming the parameter cannot defeat them.
   assert.doesNotMatch(output, /<\s*\w+\s*=\s*(?!unknown\b)\w+/);
   assert.doesNotMatch(output, /\bextends\s+(?!unknown\b)\w+\s*>/);
+});
+
+test('fixed-point diagnostics report convergence and round count', () => {
+  // The inference table must expose whether fixed-point iteration converged
+  // and how many rounds it used, so a non-converged long chain is observable
+  // rather than silently returning a partial table.
+  const source = `
+let a: any = 1;
+let b: any = a;
+let c: any = b;
+declare function take(n: number): void;
+take(c);
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'diag-'));
+  const file = path.join(directory, 'case.ts');
+  fs.writeFileSync(file, source, 'utf8');
+  try {
+    const program = ts.createProgram([file], compilerOptions);
+    const ctx = createContext(program.getTypeChecker(), program, createTable());
+    const table = buildInferenceTable(collectAnyOwners(program), ctx);
+    assert.equal(table.diagnostics.converged, true);
+    assert.ok(table.diagnostics.rounds >= 1);
+    assert.ok(table.diagnostics.rounds <= MAX_FIXED_POINT_ROUNDS);
+    assert.equal(table.diagnostics.maxRounds, MAX_FIXED_POINT_ROUNDS);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('tuple element any is projected to the element slot, not the whole tuple', () => {

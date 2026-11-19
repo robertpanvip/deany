@@ -403,6 +403,31 @@ class P {
   assert.equal(checkStrict('p.ts', second).ok, true);
 });
 
+test('regex literal in a parameter default does not confuse paren finding', () => {
+  // Regression: findParens used a hand-written char scanner that treated the
+  // `)` inside a regex literal like `/\)/` as the parameter list's closing
+  // paren, inserting the return type in the wrong place (TS1005).
+  // The AST's CloseParenToken gives the real closing paren regardless of regex.
+  const source = `/**
+ * @param {RegExp} re
+ * @returns {boolean}
+ */
+function test(re = /\\)\\//) {
+  return re.test('abc');
+}
+`;
+  const output = convertJsWithResolver('regex.js', source);
+  // The full regex literal `/\)\//` must survive intact and the return type
+  // must follow the real close paren. A hand-written scanner put `: boolean`
+  // inside the regex, corrupting both (TS1005). Use an exact raw string match
+  // rather than a regex, so `\` and `)` need no fragile double escaping.
+  assert.ok(
+    output.includes(String.raw`function test(re: RegExp = /\)\//): boolean {`),
+    `unexpected output:\n${output}`,
+  );
+  assert.equal(checkStrict('regex.ts', output).ok, true);
+});
+
 test('a UTF-8 BOM does not skew annotation offsets', () => {
   // ts.createSourceFile counts a leading BOM as trivia, but EditBuffer worked
   // on the raw string, so annotations landed before the name

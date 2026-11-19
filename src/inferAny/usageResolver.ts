@@ -121,6 +121,13 @@ export function createUsageResolver(
   return {
     getSourceFile: (fileName) => program.getSourceFile(fileName),
     infer: (owner) => ownerType(ctx.table, owner),
+    symbolOf: (node) => {
+      let symbol = checker.getSymbolAtLocation(node);
+      if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+        symbol = checker.getAliasedSymbol(symbol);
+      }
+      return symbol;
+    },
     typeOf: (node) => typeText(ctx, node as ts.Expression),
     overridesBase: (member) => {
       const classDecl = member.parent;

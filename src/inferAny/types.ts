@@ -43,6 +43,16 @@ export interface InferenceTable {
   readonly returns: Map<ts.Node, string>;
   /** Owners inferred only from weak (property-shape) evidence; re-evaluated. */
   readonly weakOwners: Set<ts.Node>;
+  /**
+   * Number of fixed-point rounds actually executed, and whether convergence
+   * was reached before the cap. Exposed so callers can detect a non-converged
+   * long dependency chain instead of silently returning a partial table.
+   */
+  readonly diagnostics: {
+    rounds: number;
+    converged: boolean;
+    maxRounds: number;
+  };
 }
 
 export interface InferenceContext {
@@ -116,6 +126,13 @@ export type MutationKind = 'collection' | 'map' | 'set';
 export interface UsageResolver {
   readonly getSourceFile: (fileName: string) => ts.SourceFile | undefined;
   readonly infer: (owner: ts.Node) => string | undefined;
+  /**
+   * Resolve the symbol an identifier refers to, following import aliases.
+   * Used by the converter to compare declarations by symbol identity rather
+   * than by spelling (so same-named locals in other scopes cannot be confused).
+   * Returns undefined when the checker cannot bind the node.
+   */
+  readonly symbolOf: (node: ts.Node) => ts.Symbol | undefined;
   /**
    * Best-effort type text for an arbitrary expression, using the same checker
    * and inference table as `infer`. Used where the converter needs the type of

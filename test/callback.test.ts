@@ -7,6 +7,8 @@ import * as ts from 'typescript';
 import { convertSource } from '../src/convert.js';
 import { checkStrict } from '../src/check.js';
 import { createUsageResolver } from '../src/inferAny.js';
+import { callbackReceiverHasJSDocType } from '../src/convert/callback.js';
+import { parseJsDocBlocks } from '../src/jsdoc.js';
 
 const compilerOptions: ts.CompilerOptions = {
   allowJs: true,
@@ -75,6 +77,43 @@ eachUnknown(function(value, key) { return value; });
   assert.match(output, /function\(value: unknown, key: unknown\)/);
   const check = checkStrict('case.ts', output);
   assert.equal(check.diagnostics.some((d) => d.includes('TS7006')), false);
+});
+
+test('JSDoc-typed receiver is matched by symbol, not by same name in another scope', () => {
+  // Regression: callbackReceiverHasJSDocType used to match `declName.text ===
+  // receiverName` across the whole file, so `bar(nums)` (no JSDoc) was wrongly
+  // treated as typed because `foo(nums)` elsewhere had `@param {number[]}`.
+  // That skipped annotating bar's callback and could leave `x` an implicit any.
+  const source = `
+/** @param {number[]} nums */
+function foo(nums) { return nums.map(x => x * 2); }
+function bar(nums) { return nums.map(x => x.length); }
+`;
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'callback-symbol-'));
+  const file = path.join(directory, 'case.js');
+  fs.writeFileSync(file, source, 'utf8');
+  try {
+    const resolver = createUsageResolver([file], compilerOptions);
+    // Nodes must come from the resolver's own program: symbols are checker-specific,
+    // so mixing a separately-created program's nodes would break identity matches.
+    const sourceFile = resolver.getSourceFile(file)!;
+    const blocks = parseJsDocBlocks(source);
+
+    const arrows: ts.ArrowFunction[] = [];
+    const visit = (n: ts.Node): void => {
+      if (ts.isArrowFunction(n)) arrows.push(n);
+      ts.forEachChild(n, visit);
+    };
+    visit(sourceFile);
+    assert.equal(arrows.length, 2);
+
+    // foo's arrow: receiver really is the JSDoc-typed `nums` -> true.
+    assert.equal(callbackReceiverHasJSDocType(arrows[0]!, resolver, sourceFile, source, blocks), true);
+    // bar's arrow: same name `nums`, but a different symbol with no JSDoc -> false.
+    assert.equal(callbackReceiverHasJSDocType(arrows[1]!, resolver, sourceFile, source, blocks), false);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('--no-callback-params equivalent: option disables annotation', () => {

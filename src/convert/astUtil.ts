@@ -62,64 +62,38 @@ export function describe(node: ts.Node): string {
   return ts.SyntaxKind[node.kind] ?? 'declaration';
 }
 
-/** Locate the parameter-list parentheses of a function-like node. */
+/**
+ * Locate the parameter-list parentheses of a function-like node.
+ *
+ * Both tokens come straight from the TypeScript AST. A hand-written character
+ * scanner used to balance `(`/`)` itself, but it did not understand regular
+ * expression literals: a default value like `x = /\)/.test(s)` made it treat
+ * the `)` inside the regex as the closing paren, returning the wrong `close`
+ * (or none at all). The parser already tokenizes these constructs correctly,
+ * so reading OpenParenToken / CloseParenToken removes the whole lexical class
+ * of bugs (strings, templates, comments, regex, nested expressions).
+ *
+ * `source` is kept in the signature for call-site compatibility.
+ */
 export function findParens(
   node: FunctionLikeNode,
   sourceFile: ts.SourceFile,
-  source: string,
+  _source: string,
 ): { open: number; close: number } | undefined {
-  let open = -1;
+  let open: number | undefined;
+  let close: number | undefined;
   for (const child of node.getChildren(sourceFile)) {
-    if (child.kind === ts.SyntaxKind.OpenParenToken) {
+    if (open === undefined && child.kind === ts.SyntaxKind.OpenParenToken) {
       open = child.getStart(sourceFile);
+    } else if (open !== undefined && child.kind === ts.SyntaxKind.CloseParenToken) {
+      close = child.getStart(sourceFile);
       break;
     }
   }
-  if (open < 0) {
+  if (open === undefined || close === undefined) {
     return undefined;
   }
-
-  let depth = 0;
-  for (let i = open; i < source.length; i += 1) {
-    const ch = source[i] ?? '';
-    if (ch === '/' && source[i + 1] === '/') {
-      while (i < source.length && source[i] !== '\n') {
-        i += 1;
-      }
-      continue;
-    }
-    if (ch === '/' && source[i + 1] === '*') {
-      const close = source.indexOf('*/', i + 2);
-      if (close >= 0) {
-        i = close + 1;
-        continue;
-      }
-    }
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const quote = ch;
-      i += 1;
-      while (i < source.length) {
-        if (source[i] === '\\') {
-          i += 2;
-          continue;
-        }
-        if (source[i] === quote) {
-          break;
-        }
-        i += 1;
-      }
-      continue;
-    }
-    if (ch === '(') {
-      depth += 1;
-    } else if (ch === ')') {
-      depth -= 1;
-      if (depth === 0) {
-        return { open, close: i };
-      }
-    }
-  }
-  return undefined;
+  return { open, close };
 }
 
 /** Find the end offset of a keyword child such as `function`. */

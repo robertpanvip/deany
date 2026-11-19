@@ -7,8 +7,17 @@ export const DEFAULT_INFER_OPTIONS: InferAnyOptions = {
   includeAssertions: false,
 }
 
+/** Cap on fixed-point propagation rounds. Exported so diagnostics and tests
+ * share one source of truth. */
+export const MAX_FIXED_POINT_ROUNDS = 16;
+
 export function createTable(): InferenceTable {
-  return { declarations: new Map(), returns: new Map(), weakOwners: new Set() };
+  return {
+    declarations: new Map(),
+    returns: new Map(),
+    weakOwners: new Set(),
+    diagnostics: { rounds: 0, converged: true, maxRounds: MAX_FIXED_POINT_ROUNDS },
+  };
 }
 
 export function createContext(
