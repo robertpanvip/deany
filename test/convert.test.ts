@@ -1,8 +1,29 @@
 import assert from 'node:assert/strict';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { test } from 'node:test';
+import * as ts from 'typescript';
 import { checkStrict } from '../src/check.js';
 import { strictTsConfig } from '../src/config.js';
 import { convertSource } from '../src/convert.js';
+import { createUsageResolver } from '../src/inferAny.js';
+
+const jsCompilerOptions: ts.CompilerOptions = {
+  allowJs: true, checkJs: true, noEmit: true, strict: true,
+  target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler, skipLibCheck: true,
+};
+function convertJsWithResolver(fileName: string, source: string, opts: Parameters<typeof convertSource>[2] = {}): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cv-'));
+  const file = path.join(dir, fileName);
+  fs.writeFileSync(file, source, 'utf8');
+  try {
+    return convertSource(file, source, { banner: false, ...opts }, createUsageResolver([file], jsCompilerOptions)).output;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 test('annotates function parameters and return types from JSDoc', () => {
   const source = `
@@ -252,4 +273,98 @@ test('checkStrict accepts Node globals emitted verbatim from JS', () => {
   ].join('\n');
   const result = checkStrict('case.ts', output);
   assert.equal(result.ok, true, result.diagnostics.join('\n'));
+});
+
+test('declare/ambient declarations never get a stacked annotation (double colon)', () => {
+  // `declare` members already carry their types. Stacking an inferred annotation
+  // produced `declare const X: unknown: number;` (TS1005) and `bar(): unknown: void`
+  // (TS1144) — pure type declarations must be left untouched.
+  const source = `
+declare const X: number;
+declare class D { foo: number; bar(): void; }
+declare function g(a: string): void;
+`;
+  const { output, diagnostics } = convertSource('decl.js', source, { banner: false });
+  assert.equal(diagnostics.length, 0);
+  assert.doesNotMatch(output, /:\s*unknown\s*:/);
+  assert.doesNotMatch(output, /:\s*unknown\s*:/);
+  assert.match(output, /declare const X: number;/);
+  assert.match(output, /bar\(\): void;/);
+  assert.match(output, /declare function g\(a: string\): void;/);
+  assert.equal(checkStrict('decl.ts', output).ok, true);
+});
+
+test('@template on a class emits class Box<T> (no dangling T)', () => {
+  const source = `
+/** @template T */
+class Box {
+  /** @param {T} v */
+  constructor(v) { this.v = v; }
+}
+`;
+  const output = convertJsWithResolver('box.js', source);
+  assert.match(output, /class Box<T>/);
+  assert.match(output, /constructor\(v: T\)/);
+  assert.equal(checkStrict('box.ts', output).ok, true);
+});
+
+test('subclass members that really override a base member get override (noImplicitOverride)', () => {
+  const source = `
+class Base { greet() { return 'hi'; } }
+class Child extends Base { greet() { return 'hello'; } }
+class Other extends Base { distinct() { return 1; } }
+`;
+  const output = convertJsWithResolver('ov.js', source);
+  assert.match(output, /class Child extends Base \{ override greet\(\)/);
+  assert.doesNotMatch(output, /override distinct/);
+  assert.equal(checkStrict('ov.ts', output).ok, true);
+});
+
+test('--no-typedef still emits fallback aliases so references do not dangle', () => {
+  const source = `
+/** @typedef {{name: string}} User */
+/** @param {User} u */
+function f(u) { return u; }
+`;
+  const { output } = convertSource('td.js', source, { banner: false, emitTypedefs: false });
+  assert.doesNotMatch(output, /type User = \{/);
+  assert.match(output, /type User = unknown;/);
+  assert.equal(checkStrict('td.ts', output).ok, true);
+});
+
+test('fallback alias never collides with a real class/interface of the same name', () => {
+  const source = `
+class Foo {}
+/** @returns {x is Foo} */
+function check(x) { return true; }
+`;
+  const { output } = convertSource('alias.js', source, { banner: false });
+  assert.doesNotMatch(output, /type Foo = unknown;/);
+  assert.match(output, /function check\(x: unknown\): x is Foo/);
+  assert.equal(checkStrict('alias.ts', output).ok, true);
+});
+
+test('curried arrow from nested @returns function type stays callable', () => {
+  // Nested `function(N): function(N): R` used to normalize to broken syntax
+  // (TS1005), and the inner returned arrows got `: unknown` return annotations
+  // that contradicted the declared nested function type (TS2322).
+  const source = `/** @returns {function(number): function(number): number} */
+function make(a) { return b => c => a + b + c; }
+const r = make(1)(2)(3);
+`;
+  const output = convertJsWithResolver('curry.js', source);
+  assert.match(output, /make\(a: number\): \(arg0: number\) => \(arg0: number\) => number/);
+  assert.doesNotMatch(output, /=> unknown =>/);
+  assert.equal(checkStrict('curry.ts', output).ok, true);
+});
+
+test('a concrete object shape indexed dynamically keeps its shape and gains an index signature', () => {
+  // `pick(o, k) { return o[k]; } pick({a:1,b:2}, 'a')`: o has a real shape from
+  // the call site but is also indexed by an arbitrary key. Replacing it wholly
+  // with Record would discard evidence; leaving it as `{a;b}` raised TS7053.
+  // It must keep its properties plus a string index signature.
+  const source = 'function pick(o, k) { return o[k]; }\nconst v = pick({ a: 1, b: 2 }, \'a\');\n';
+  const output = convertJsWithResolver('pick.js', source);
+  assert.match(output, /o: \{ a: number; b: number; \[key: string\]: unknown; \}/);
+  assert.equal(checkStrict('pick.ts', output).ok, true);
 });

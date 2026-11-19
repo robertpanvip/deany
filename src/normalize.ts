@@ -58,18 +58,51 @@ function genericArguments(text: string, name: string): string[] | undefined {
 
 /** Convert JSDoc `function(string, number): boolean` into a TS function type. */
 function convertFunctionType(text: string, options: ConvertOptions): string | undefined {
-  const match = /^function\s*\(([\s\S]*)\)\s*(?::\s*([\s\S]+))?$/.exec(text);
-  if (match === null) {
+  if (!/^function\s*\(/.test(text)) {
     return undefined;
   }
-  const params = splitTopLevel(match[1] ?? '', ',').map((part, index) => {
+  // Find the ')' matching the parameter-list '(' by depth, so a nested return
+  // type such as `function(number): function(number): number` is split at the
+  // FIRST top-level ')' — not the last one. The old greedy regex swallowed the
+  // inner function and emitted broken syntax like
+  // `(arg0: number): function(number) => number` (TS1005, TS2571 on curried
+  // calls). Track delimiter depth so nested generics/call signatures in params
+  // are handled too.
+  const open = text.indexOf('(');
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < text.length; i += 1) {
+    const ch = text[i] ?? '';
+    if (ch === '(') {
+      depth += 1;
+    } else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close < 0) {
+    return undefined;
+  }
+  const paramsText = text.slice(open + 1, close).trim();
+  const rest = text.slice(close + 1).trim();
+  let returnsText = 'void';
+  if (rest.length > 0) {
+    if (!rest.startsWith(':')) {
+      return undefined;
+    }
+    returnsText = rest.slice(1).trim();
+  }
+  const params = splitTopLevel(paramsText, ',').filter((part) => part.length > 0).map((part, index) => {
     if (part.startsWith('...')) {
       const inner = normalizeJsDocType(part.slice(3), options);
       return `...arg${index}: ${inner}[]`;
     }
     return `arg${index}: ${normalizeJsDocType(part, options)}`;
   });
-  const returns = normalizeJsDocType((match[2] ?? 'void').trim(), options);
+  const returns = normalizeJsDocType(returnsText.length > 0 ? returnsText : 'void', options);
   return `(${params.join(', ')}) => ${returns}`;
 }
 

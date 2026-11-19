@@ -410,3 +410,17 @@
 **效果**：n1 返回 `unknown`（参数仍干净还原 `Function | boolean | number | string`）；连带 n4（`number|unknown`）、n5（`number|unknown`）同样收敛为 `unknown`，语义等价且更诚实。全套测试 206→207（新增 1 项：不可知调用结果收敛为裸 unknown，并断言不出现含 unknown 的联合），typecheck 干净，build 通过，7/7 收窄样例 strict 通过。
 
 样例与产物：`/workspace/deany-demo/narrowing/`；对比报告 `narrowing-report.html`（n1/n4/n5 产物已同步）。
+
+## 结构错位替换 + 9 项真实缺陷（0.1.15）
+
+用户 review 报告指出 infer-any 会生成**无法编译**的 TS（比"推不出"严重：把能编译的代码改坏），另列 5 项 P0-P2 + 3 项 P3。逐条复现后全部修复，测试 211→218（新增 7 项回归），typecheck/build 干净，demo 6 样例 strict 通过。
+
+**核心缺陷 — infer-any 结构错位替换**（`src/inferAny.ts`）：`slotPathOf` 只建模 `any[]` / `Type<...,any>` typeArgument，对泛型默认值/约束、元组元素、函数类型返回位返回空路径 `[]`，于是把 owner 的 wholeType 填进 any 位：`<T = any>`→`<T = void>`、`<T extends any>`→`<T extends void>`（自引用/循环）、`[any, number]`→`[[string,number],number]`（TS2322）、`(x:number)=>any`→`(x:number)=>(x:number)=>number`（TS2322）。新增 `specialSlotType` 前置投影：泛型槽无 usage 证据，替换为等价合法的 `unknown`（并让 mergeMutationEvidence 的 unknown 兜底直通）；元组元素用 `getTypeArguments(tuple)[i]`（原 `structuredSlotType` 误用 `getIndexTypeOfType(Number)` 实测返回 any）；函数返回位用 `getSignaturesOfType(Call)[0].getReturnType()`。全部 strict 通过；`Array<Array<any>>` 既有正确投影不受影响。
+
+- **P0 declare 双冒号**：`declare const X: number`→`X: unknown: number`（TS1005）。`processVariable`/`processProperty` 及函数参数/返回注解缺"已有注解"守卫。加 `node.type !== undefined` / `parameter.type === undefined` / `hasExplicitReturnType` 守卫，纯声明不再叠加注解。
+- **P1 class @template**：visit 未处理 ClassDeclaration，`@template T` 只在函数上生成 `<T>`，class 缺 `class Box<T>` 致 T 悬空 TS2304。新增 class 分支：有 heritageClauses 无 typeParameters 时按 @template 插入 `<T, U>`。规范样例 `class Box<T>` + `constructor(v: T)` + 字段提升，strict 通过。
+- **P1 override 缺失**：工具自身 tsconfig/checkStrict 开了 `noImplicitOverride`，但子类重写方法不补 `override`→TS4114。给 UsageResolver 加 `overridesBase(member)`（checker `getBaseTypes` + `base.getProperty(name)` 真证据），convert 对真实重写插 `override `，非重写不误伤。
+- **P2 --no-typedef 悬空**：`@typedef User` 关闭生成后 `u: User` 无定义 TS2304。`definedNames` 仅在 emitTypedefs 时计入 typedef，否则落入 fallback `type User = unknown`。
+- **P2 兜底别名撞 class**：`class Foo` + `@returns {x is Foo}` 额外生成 `type Foo = unknown`→TS2300。dangling 收集排除源文件真实声明名（class/interface/enum/type alias）。谓词 `x is Foo` 本身转换正确。
+- **P3 嵌套/柯里化函数类型**：`function(number): function(number): number` 被贪婪正则吞成 `(arg0:number): function(number)=>number`（TS1005/TS2571）。`convertFunctionType` 改为按深度找首个顶层 `)`，正确生成嵌套箭头；返回位置的箭头链不再补 `: unknown`（`isReturnPositionArrow`），让 TS 从外层声明推断，`make(1)(2)(3)` strict 通过，变量初始化箭头（shout）行为不变。
+- **P3 动态索引键 TS7053**：`pick(o,k){return o[k]}` + 调用点 `{a:1}` 时 o 推成具体形状但被 string 键索引而失败。新增 `addStringIndexSignature`：形状保留真实属性并补 `[key: string]: unknown`，而非丢弃证据换成 Record，strict 通过。

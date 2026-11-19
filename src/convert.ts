@@ -182,6 +182,43 @@ function isCallbackArgument(node: FunctionLikeNode): boolean {
 }
 
 /**
+ * True when a function node is used as a returned value (`return x => ...`,
+ * including a `return` inside an outer arrow). Such a function — and the
+ * nested arrows it returns — sits under a declaration whose JSDoc @returns
+ * typically already describes the full nested function type, so stamping each
+ * inner arrow with `: unknown` contradicts that type (TS2322). Walk through
+ * transparent wrappers (parentheses, `as`, non-null) up to the first statement
+ * boundary.
+ */
+function isReturnPositionArrow(node: ts.Node): boolean {
+  let current: ts.Node = node;
+  let parent = current.parent;
+  while (parent !== undefined) {
+    if (ts.isReturnStatement(parent)) {
+      return true;
+    }
+    // A nested expression-bodied arrow (`b => c => ...`): the inner arrow is
+    // the outer arrow's body, so inherit the outer's return-position status.
+    if (ts.isArrowFunction(parent) && parent.body === current) {
+      current = parent;
+      parent = current.parent;
+      continue;
+    }
+    if (
+      ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isNonNullExpression(parent)
+    ) {
+      current = parent;
+      parent = current.parent;
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
+/**
  * Detect a callback passed to a method call on a receiver that the converter
  * will give a concrete type via JSDoc, so lib.d.ts will contextually type the
  * callback parameters. Covers `sum(nums)` where `nums` has `@param {...number}`
@@ -440,7 +477,12 @@ export function convertSource(
       (typeParameters.length > 0 ? `<${typeParameters.join(', ')}>` : undefined);
 
     let returnAnnotation: string | undefined;
-    if (!skipReturn) {
+    // A function/method that already carries a return type annotation (e.g. a
+    // `declare` class method `bar(): void;`) must not get a second one — that
+    // emits `bar(): unknown: void` (TS1144). Pure declarations are off-limits.
+    const hasExplicitReturnType =
+      'type' in node && (node as ts.SignatureDeclaration).type !== undefined;
+    if (!skipReturn && !hasExplicitReturnType) {
       if (dtsSig?.returnType !== undefined) {
         // The d.ts return type is authoritative and already fully written
         // (including any Promise<...> for async functions) — do not re-wrap.
@@ -455,7 +497,12 @@ export function convertSource(
         const inferred = resolver?.infer(node);
         if (inferred !== undefined) {
           returnAnnotation = `: ${async ? wrapAsyncReturn(inferred, options) : inferred}`;
-        } else if (options.annotateUntyped) {
+        } else if (options.annotateUntyped && !isReturnPositionArrow(node)) {
+          // A curried/returned arrow (`return b => c => ...`) usually has an
+          // enclosing declaration whose JSDoc @returns already spells out the
+          // nested function type. Annotating its inner arrows with `: unknown`
+          // contradicts that declared type (TS2322) — let TypeScript infer the
+          // inner return from the expression instead. See isReturnPositionArrow.
           returnAnnotation = `: ${async ? 'Promise<unknown>' : options.defaultType}`;
         }
       }
@@ -599,7 +646,10 @@ export function convertSource(
         ) {
           continue;
         }
-        if (annotation !== undefined) {
+        // A parameter that already has a type annotation (e.g. in a `declare`
+        // function) must not get a second one — that emits `a: unknown: string`
+        // (TS1005). Leave explicitly typed parameters untouched.
+        if (annotation !== undefined && parameter.type === undefined) {
           edits.add(parameter.name.end, annotation);
         }
       }
@@ -620,6 +670,12 @@ export function convertSource(
   };
 
   const processVariable = (node: ts.VariableDeclaration, doc: JsDocBlock | undefined): void => {
+    // Never stack an annotation onto a binding that already has one. Doing so
+    // on `declare const X: number;` emits `declare const X: unknown: number;`
+    // (TS1005 double colon) — pure type declarations must be left untouched.
+    if (node.type !== undefined) {
+      return;
+    }
     // `for (const x of ys)` forbids a type annotation on the loop binding.
     if (
       ts.isVariableDeclarationList(node.parent) &&
@@ -694,6 +750,11 @@ export function convertSource(
       type = options.defaultType;
     }
     if (type === undefined) {
+      return;
+    }
+    // An already-annotated member (e.g. `declare foo: number;`) must not get a
+    // second annotation — that produces a double colon (TS1005).
+    if (node.type !== undefined) {
       return;
     }
     const needsDefiniteAssignment =
@@ -838,6 +899,38 @@ export function convertSource(
       processProperty(node, doc);
     }
 
+    if (ts.isClassDeclaration(node) && node.name !== undefined && !processed.has(node)) {
+      processed.add(node);
+      const doc = leadingJsDoc(node, sourceFile, source, blocks);
+      // `@template T` on a class must produce `class Box<T>`, exactly as on
+      // functions; otherwise the referenced T stays undeclared (TS2304).
+      const templateTag = doc?.tags.find((tag) => tag.tag === 'template');
+      if (templateTag !== undefined && (node.typeParameters === undefined || node.typeParameters.length === 0)) {
+        const names = parseTemplateNames(templateTag);
+        if (names.length > 0) {
+          edits.add(node.name.end, `<${names.join(', ')}>`);
+        }
+      }
+      // The tool's own strict tsconfig enables `noImplicitOverride`, so a
+      // subclass member that genuinely overrides a base member must carry
+      // `override` (TS4114). The resolver confirms the base really has a member
+      // of the same name via the checker — only real overrides are marked,
+      // never guessed from shape or name alone.
+      if (resolver !== undefined) {
+        for (const member of node.members) {
+          if (member.name === undefined || ts.isConstructorDeclaration(member)) {
+            continue;
+          }
+          const hasOverride =
+            ts.canHaveModifiers(member) &&
+            (ts.getModifiers(member) ?? []).some((m) => m.kind === ts.SyntaxKind.OverrideKeyword);
+          if (!hasOverride && resolver.overridesBase(member)) {
+            edits.add(member.getStart(sourceFile), 'override ');
+          }
+        }
+      }
+    }
+
     ts.forEachChild(node, visit);
   };
 
@@ -873,11 +966,18 @@ export function convertSource(
   // JSDoc may reference custom type names that have no `@typedef` in this file
   // (cross-file typedefs, or simply missing definitions). Emit fallback aliases
   // so the generated TS stays valid; the name is preserved for later completion.
+  // A @typedef only counts as "defined" when it was actually emitted. With
+  // --no-typedef no `type User = ...` is generated, yet references like `u:
+  // User` remain; treating User as defined left them dangling (TS2304) and made
+  // the option unusable on its own. Let such names fall through to the fallback
+  // aliases below so the output still compiles.
   const definedNames = new Set<string>();
-  for (const block of blocks) {
-    for (const tag of block.tags) {
-      if ((tag.tag === 'typedef' || tag.tag === 'callback') && tag.name !== undefined) {
-        definedNames.add(tag.name);
+  if (options.emitTypedefs) {
+    for (const block of blocks) {
+      for (const tag of block.tags) {
+        if ((tag.tag === 'typedef' || tag.tag === 'callback') && tag.name !== undefined) {
+          definedNames.add(tag.name);
+        }
       }
     }
   }
@@ -894,6 +994,25 @@ export function convertSource(
   const dtsTypeNames = new Set<string>(
     declarations === undefined ? [] : declarations.typeDeclarations.map((decl) => decl.name),
   );
+  // Never emit a fallback `type X = unknown` when X is already a real
+  // declaration in the source (class/interface/enum/type alias). Doing so for
+  // `class Foo` + `@returns {x is Foo}` produced `type Foo = unknown` alongside
+  // `class Foo` (TS2300 duplicate identifier), even though the `x is Foo`
+  // predicate itself converted correctly.
+  const localDeclaredNames = new Set<string>();
+  const collectDeclaredName = (n: ts.Node): void => {
+    if (
+      (ts.isClassDeclaration(n) ||
+        ts.isInterfaceDeclaration(n) ||
+        ts.isEnumDeclaration(n) ||
+        ts.isTypeAliasDeclaration(n)) &&
+      n.name !== undefined
+    ) {
+      localDeclaredNames.add(n.name.text);
+    }
+    ts.forEachChild(n, collectDeclaredName);
+  };
+  collectDeclaredName(sourceFile);
   const dangling = new Set<string>();
   for (const block of blocks) {
     for (const tag of block.tags) {
@@ -903,7 +1022,7 @@ export function convertSource(
       for (const name of extractCustomTypeNames(tag.typeText, definedNames, templateNames)) {
         // A sibling d.ts already provides this type — emitting a fallback
         // `type X = unknown` would conflict with the real declaration.
-        if (!dtsTypeNames.has(name)) {
+        if (!dtsTypeNames.has(name) && !localDeclaredNames.has(name)) {
           dangling.add(name);
         }
       }

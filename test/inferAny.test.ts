@@ -887,3 +887,38 @@ const t: any = mk().toString();
   assert.match(output, /const s: string = mk\(\)\.join/);
   assert.match(output, /const t: string = mk\(\)\.toString/);
 });
+
+// --- Structural slot projection: no more non-compiling substitutions --------
+
+test('generic parameter default/constraint never gets the owner whole type', () => {
+  // slotPathOf only models `any[]` / `Type<..., any>`. A bare `<T = any>` or
+  // `<T extends any>` fell through with an empty path and got the enclosing
+  // function's return type substituted (`<T = void>` / `<T extends void>`),
+  // which is meaningless or circular. Both must become the legal, equivalent
+  // `unknown` — never the function's own type, never a self-reference.
+  const { output } = infer(`
+export function withDefault<T = any>(v: T) {}
+export function withConstraint<T extends any>(v: T) {}
+`);
+  assert.match(output, /withDefault<T = unknown>/);
+  assert.match(output, /withConstraint<T extends unknown>/);
+  assert.doesNotMatch(output, /<T = (?!unknown)/);
+  assert.doesNotMatch(output, /extends T>/);
+});
+
+test('tuple element any is projected to the element slot, not the whole tuple', () => {
+  // `[any, number]` previously became `[[string, number], number]` (the whole
+  // inferred tuple substituted into element 0) -> TS2322.
+  const { output } = infer(`export const t: [any, number] = ['a', 1];`);
+  assert.match(output, /const t: \[string, number\]/);
+  assert.doesNotMatch(output, /\[\[string/);
+});
+
+test('function-type return any is projected to the return slot, not re-wrapped', () => {
+  // `(x: number) => any` previously became
+  // `(x: number) => (x: number) => number` (the whole function type substituted
+  // into its own return) -> TS2322.
+  const { output } = infer(`export const cb: (x: number) => any = x => x;`);
+  assert.match(output, /const cb: \(x: number\) => number/);
+  assert.doesNotMatch(output, /=> \(x: number\) =>/);
+});

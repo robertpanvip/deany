@@ -281,6 +281,83 @@ function structuredSlotType(
 }
 
 /**
+ * Project an `any` token that sits in a slot which `slotPathOf` does not model
+ * (it only understands `any[]` and `Type<..., any>` type arguments). For those
+ * slots the generic projection returns the whole owner type at path `[]`,
+ * which gets substituted into the any position and produces structurally
+ * wrong, non-compiling code:
+ *
+ *   `<T = any>`          -> `<T = void>`      (owner is the function: self/void)
+ *   `<T extends any>`    -> `<T extends void>`(circular/meaningless constraint)
+ *   `[any, number]`      -> `[[string, number], number]` (tuple nested in slot 0)
+ *   `(x: number) => any` -> `(x: number) => (x: number) => number` (double arrow)
+ *
+ * Handle these explicitly. Generic parameter defaults/constraints have no
+ * usage evidence to infer from — the `any` is a "no constraint / any default"
+ * placeholder — so replace it with `unknown`, which is equivalent and legal
+ * there, and never with the enclosing declaration's whole value type. Tuple
+ * elements and function-type return positions are projected from the
+ * initializer's structured checker type. If that projection is unavailable,
+ * fall back to `unknown` rather than the whole type, so we never emit illegal
+ * code. Returns undefined for slots the generic path already handles.
+ */
+function specialSlotType(node: ts.Node, owner: ts.Node, ctx: InferenceContext): string | undefined {
+  const parent = node.parent;
+  if (parent === undefined) {
+    return undefined;
+  }
+
+  // Generic parameter default / constraint: `<T = any>` / `<T extends any>`.
+  // No initializer projection applies; `unknown` is the honest, legal slot.
+  if (ts.isTypeParameterDeclaration(parent)) {
+    return parent.default === node || parent.constraint === node ? 'unknown' : undefined;
+  }
+
+  // Tuple elements and function-type returns need the owner's initializer to
+  // read the concrete slot type from the checker (a printed whole-type string
+  // cannot be safely parsed for `[a, b]` / `=> R` here).
+  if (!ts.isVariableDeclaration(owner) && !ts.isPropertyDeclaration(owner)) {
+    return undefined;
+  }
+  const init = owner.initializer;
+  if (init === undefined) {
+    return undefined;
+  }
+  const initType = ctx.checker.getTypeAtLocation(init);
+
+  const slotText = (type: ts.Type | undefined): string => {
+    if (type === undefined) {
+      return 'unknown';
+    }
+    const widened = ctx.checker.getWidenedType(type);
+    if (widened.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) {
+      return 'unknown';
+    }
+    const text = widenedTypeText(ctx.checker, widened, node);
+    return text.length === 0 || text === 'any' ? 'unknown' : text;
+  };
+
+  if (ts.isTupleTypeNode(parent)) {
+    const index = parent.elements.indexOf(node as ts.TypeNode);
+    if (index < 0) {
+      return undefined;
+    }
+    const args = ctx.checker.getTypeArguments(initType as ts.TypeReference);
+    return slotText(args[index]);
+  }
+
+  if (
+    (ts.isFunctionTypeNode(parent) || ts.isConstructorTypeNode(parent)) &&
+    parent.type === node
+  ) {
+    const sigs = ctx.checker.getSignaturesOfType(initType, ts.SignatureKind.Call);
+    return slotText(sigs[0]?.getReturnType());
+  }
+
+  return undefined;
+}
+
+/**
  * `Record<K, any>` / `ReadonlyRecord<K, any>` keep their *values* in the `any`
  * slot. When the initializer is an object literal, the checker reports its
  * whole shape (`{ a: number; b: number; }`), which has no type arguments and
@@ -1341,6 +1418,28 @@ function typeofLiteralToType(literal: string): string {
  * for `x[k]`, `x[symbol]` and `for (k in x)` without inventing a value type.
  */
 const INDEXABLE_OBJECT = 'Record<PropertyKey, unknown>';
+
+/**
+ * Add a string index signature to an object shape type so it can be indexed
+ * by an arbitrary string key (`o[k]`) without dropping its known properties.
+ * Used when a binding has both a concrete shape source (e.g. `{ a: number; }`
+ * from a call site) and the dynamic-index constraint — replacing the whole
+ * shape with Record would discard real evidence, so keep the shape and make it
+ * indexable instead. Returns undefined for non-object shapes or when an index
+ * signature is already present.
+ */
+function addStringIndexSignature(type: string): string | undefined {
+  const text = type.trim();
+  if (!text.startsWith('{') || !text.endsWith('}')) {
+    return undefined;
+  }
+  if (/\[[^\]]+:\s*(?:string|number|PropertyKey)\]/.test(text)) {
+    return undefined; // already indexable
+  }
+  const inner = text.slice(1, -1).trim();
+  const suffix = inner.length === 0 || inner.endsWith(';') ? '' : ';';
+  return `{ ${inner}${suffix} [key: string]: unknown; }`;
+}
 
 /**
  * Memberless object sources produced by type guards: `typeof x === 'object'`
@@ -2687,12 +2786,16 @@ function mergeEvidence(evidence: Evidence): {
     // unknown>. Boxed primitives (String/Number/Boolean) are deliberately not
     // widened this way: they are not assignable to Record and would raise
     // TS2322 at the initializer, so we keep their real type instead.
-    if (
-      allowed !== undefined &&
-      allowed.includes(INDEXABLE_OBJECT) &&
-      members.every((member) => member === '{}')
-    ) {
-      members = [INDEXABLE_OBJECT];
+    if (allowed !== undefined && allowed.includes(INDEXABLE_OBJECT)) {
+      if (members.every((member) => member === '{}')) {
+        members = [INDEXABLE_OBJECT];
+      } else {
+        // A concrete object shape that is also indexed dynamically (e.g.
+        // `function pick(o, k) { return o[k]; } pick({a:1}, 'a')`) must stay
+        // indexable or strict TS emits TS7053. Keep the observed shape and add
+        // a string index signature rather than discarding its real evidence.
+        members = members.map((member) => addStringIndexSignature(member) ?? member);
+      }
     }
   } else if (allowed !== undefined && allowed.length > 0) {
     // No observed values: the required argument types are our best estimate.
@@ -2998,12 +3101,18 @@ export function inferAnyInProject(
           // reported as its whole shape, which cannot be projected through the
           // value-slot path — derive the slot from the literal's values instead.
           const recordSlot = recordValueSlotType(node, owner, ctx);
+          // Slots the path model cannot express (generic defaults/constraints,
+          // tuple elements, function-type returns) must be projected explicitly
+          // or the whole owner type gets substituted into the any position and
+          // yields non-compiling code. Check this before the generic path.
+          const special = specialSlotType(node, owner, ctx);
           // Prefer the checker's structured initializer type for projection:
           // unlike parsing a printed type string it is immune to commas inside
           // type arguments (function types, multi-arg generics). Fall back to
           // the string projection when no structured type is available.
           const structured = structuredSlotType(node, owner, ctx);
           const projected =
+            special ??
             recordSlot ??
             structured ??
             (wholeType === undefined ? undefined : projectSlotType(wholeType, slotPathOf(node)));
@@ -3016,6 +3125,16 @@ export function inferAnyInProject(
           const mutationTypes =
             mutationKind === undefined ? [] : collectMutationEvidence(owner, mutationKind, ctx);
           let usable = mergeMutationEvidence(usableProjected, mutationTypes);
+          // `mergeMutationEvidence` drops bare `unknown` as information-free,
+          // but for an explicitly handled special slot (generic default/
+          // constraint, or a tuple/function slot with no concrete projection)
+          // `unknown` IS the intended safe replacement — keeping `any` there
+          // would leave the slot untyped, and the generic whole-type fallback
+          // would be structurally illegal. Let it through when nothing better
+          // was found via mutations.
+          if (usable === undefined && usableProjected === 'unknown' && special !== undefined) {
+            usable = 'unknown';
+          }
           if (usable !== undefined && isReturnTypeAnnotationOf(node, owner)) {
             usable = wrapAsyncReturnForInfer(usable, owner);
           }
@@ -3084,6 +3203,13 @@ export interface UsageResolver {
    * `map`/`filter`-style callbacks whose types are inferred from the callee.
    */
   readonly isImplicitAnyParameter: (param: ts.ParameterDeclaration) => boolean;
+  /**
+   * True when `member` is a class member that genuinely overrides a member of
+   * the same name on the class's base type chain. Used to emit the `override`
+   * modifier required by `noImplicitOverride`, based on real checker evidence
+   * rather than a name guess.
+   */
+  readonly overridesBase: (member: ts.ClassElement) => boolean;
 }
 
 /**
@@ -3200,6 +3326,20 @@ export function createUsageResolver(
     getSourceFile: (fileName) => program.getSourceFile(fileName),
     infer: (owner) => ownerType(ctx.table, owner),
     typeOf: (node) => typeText(ctx, node as ts.Expression),
+    overridesBase: (member) => {
+      const classDecl = member.parent;
+      if (!ts.isClassDeclaration(classDecl) || classDecl.heritageClauses === undefined) {
+        return false;
+      }
+      if (member.name === undefined || ts.isConstructorDeclaration(member)) {
+        return false;
+      }
+      const memberName = member.name.getText().replace(/^['"]|['"]$/g, '');
+      const classType = checker.getTypeAtLocation(classDecl);
+      return checker
+        .getBaseTypes(classType as ts.InterfaceType)
+        .some((base) => base.getProperty(memberName) !== undefined);
+    },
     isImplicitAnyParameter: (param) => {
       // A contextual type (even `any`) means the parameter is already typed by
       // the callee, and annotating it could break inference. Only when there is

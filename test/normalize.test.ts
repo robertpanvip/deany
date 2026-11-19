@@ -121,3 +121,20 @@ test('normalizes JSDoc function types nested in unions and parens', () => {
   assert.equal(normalizeJsDocType('(a)|(b)', DEFAULT_OPTIONS), 'a | b');
   assert.equal(normalizeJsDocType('((number))', DEFAULT_OPTIONS), 'number');
 });
+
+test('normalizes nested/curried JSDoc function types (no greedy param swallow)', () => {
+  // The old greedy regex swallowed the inner function into the parameter list,
+  // emitting invalid `(arg0: number): function(number) => number` (TS1005,
+  // TS2571). Split at the FIRST top-level ')' so the return type keeps its own
+  // `function(...)` and becomes a nested arrow.
+  assert.equal(
+    normalizeJsDocType('function(number): function(number): number', DEFAULT_OPTIONS),
+    '(arg0: number) => (arg0: number) => number',
+  );
+  assert.equal(
+    normalizeJsDocType('function(number): function(string): boolean', DEFAULT_OPTIONS),
+    '(arg0: number) => (arg0: string) => boolean',
+  );
+  // Single-level and multi-param forms unchanged.
+  assert.equal(normalizeJsDocType('function(string, number): boolean', DEFAULT_OPTIONS), '(arg0: string, arg1: number) => boolean');
+});
