@@ -368,3 +368,50 @@ test('a concrete object shape indexed dynamically keeps its shape and gains an i
   assert.match(output, /o: \{ a: number; b: number; \[key: string\]: unknown; \}/);
   assert.equal(checkStrict('pick.ts', output).ok, true);
 });
+
+test('converting an already-annotated file is idempotent (no stacked annotations)', () => {
+  // Feeding a first-round product back in must not stack `: string: string`,
+  // `(): unknown: number`, `x: unknown: number` etc. (TS1005). The "already
+  // has a type" guards on parameters/returns/variables/properties handle this.
+  const first = convertJsWithResolver('f.js', `
+/** @param {string} a @returns {number} */
+function f(a) { return a.length; }
+/** @type {Array<number>} */
+const xs = [1];
+`);
+  const second = convertJsWithResolver('f2.js', first);
+  assert.equal(second, first);
+  assert.doesNotMatch(second, /string: string|unknown: number|unknown: Array/);
+  assert.equal(checkStrict('f.ts', second).ok, true);
+});
+
+test('re-promoting an existing class field does not duplicate it (TS2300)', () => {
+  // A `this.v = v` field is promoted to `v!: type;`. Re-converting that output
+  // used to append a second `v!: type;` -> duplicate identifier on 3rd run.
+  const first = convertJsWithResolver('p.js', `
+class P {
+  /** @param {number} v */
+  constructor(v) { this.v = v; }
+}
+`);
+  const second = convertJsWithResolver('p2.js', first);
+  const third = convertJsWithResolver('p3.js', second);
+  assert.equal(second, first);
+  assert.equal(third, second);
+  assert.equal((second.match(/\bv!: number;/g) ?? []).length, 1);
+  assert.equal(checkStrict('p.ts', second).ok, true);
+});
+
+test('a UTF-8 BOM does not skew annotation offsets', () => {
+  // ts.createSourceFile counts a leading BOM as trivia, but EditBuffer worked
+  // on the raw string, so annotations landed before the name
+  // (`const : numbera = 1;`, TS1134 / `function f(: stringx)`, TS1138). The
+  // entry point strips the BOM so string, AST offsets and edits agree.
+  const source = `\ufeffconst a = 1;\n/** @param {string} x @returns {string} */\nfunction f(x) { return x; }\n`;
+  const output = convertJsWithResolver('bom.js', source);
+  assert.equal(output.charCodeAt(0) === 0xfeff, false, 'BOM should be stripped');
+  assert.match(output, /const a: number = 1;/);
+  assert.match(output, /function f\(x: string\): string/);
+  assert.doesNotMatch(output, /:\s*\w+\s+\w+[:=]/); // no `numbera` / `stringx` skew
+  assert.equal(checkStrict('bom.ts', output).ok, true);
+});

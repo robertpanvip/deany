@@ -424,3 +424,15 @@
 - **P2 兜底别名撞 class**：`class Foo` + `@returns {x is Foo}` 额外生成 `type Foo = unknown`→TS2300。dangling 收集排除源文件真实声明名（class/interface/enum/type alias）。谓词 `x is Foo` 本身转换正确。
 - **P3 嵌套/柯里化函数类型**：`function(number): function(number): number` 被贪婪正则吞成 `(arg0:number): function(number)=>number`（TS1005/TS2571）。`convertFunctionType` 改为按深度找首个顶层 `)`，正确生成嵌套箭头；返回位置的箭头链不再补 `: unknown`（`isReturnPositionArrow`），让 TS 从外层声明推断，`make(1)(2)(3)` strict 通过，变量初始化箭头（shout）行为不变。
 - **P3 动态索引键 TS7053**：`pick(o,k){return o[k]}` + 调用点 `{a:1}` 时 o 推成具体形状但被 string 键索引而失败。新增 `addStringIndexSignature`：形状保留真实属性并补 `[key: string]: unknown`，而非丢弃证据换成 Record，strict 通过。
+
+## 幂等性 + BOM 错位（0.1.16）
+
+用户报告两个"静默改坏代码"缺陷：① 重复运行把产物当输入会叠加注解（`a: string: string`、`(): unknown: number`、`x: unknown: number`、`v: unknown: number`→TS1005）；② 带 BOM 文件 offset 错位（`const a: number`→`const : numbera`，TS1134/TS1138）。
+
+**复核结论**：0.1.15 起参数/返回/变量/属性注解的"已有注解则跳过"守卫（上一轮 declare 修复引入）已让四类场景幂等，用户报告基于旧版本。但复核中发现一个**未被报告的同类幂等缺陷**：构造器 `this.v = v` 字段提升每次运行都插入 `v!: number;`，第三次触发 TS2300 Duplicate identifier。
+
+**修复**：
+- `src/convert.ts` 的 `processThisAssignment`：提升字段前检查 class 是否已有同名 `PropertyDeclaration`/`PropertySignature`，有则跳过（幂等）。
+- `src/convert.ts` 的 `convertSource` 入口：剥掉 UTF-8 BOM（`0xFEFF`），让源字符串、AST offset、EditBuffer 三者共享坐标系；同时在 resolver 的 sourceFile 文本与剥后源不一致时改用无 BOM 重新 parse，避免 checker symbol 与 offset 错位。
+
+**验证**：CLI 真实两轮/三轮链路 `diff` 完全一致（幂等）；BOM 样例输出无 BOM、注解位置正确、strict 通过；测试 218→221（新增 3 项：幂等无叠加、class 字段不重复、BOM 无错位），typecheck/build 干净。

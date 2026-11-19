@@ -408,24 +408,35 @@ function typeForTaggedDeclaration(
 /** Convert a JavaScript source string into strict TypeScript source text. */
 export function convertSource(
   fileName: string,
-  source: string,
+  sourceInput: string,
   optionsInput: Partial<ConvertOptions> = {},
   resolver?: UsageResolver,
   declarations?: DeclarationProvider,
 ): ConvertResult {
   const options: ConvertOptions = { ...DEFAULT_OPTIONS, ...optionsInput };
+  // A UTF-8 BOM is counted by ts.createSourceFile as leading trivia (token
+  // offsets start after it) but stays in the raw string used by EditBuffer.
+  // That one-character skew made every annotation land before its name
+  // (`const : numbera = 1;`, TS1134/TS1138). Strip it up front so the string,
+  // the AST offsets and the edits all share one coordinate system.
+  const source = sourceInput.charCodeAt(0) === 0xfeff ? sourceInput.slice(1) : sourceInput;
   // When a resolver is supplied, use its SourceFile so checker symbols line up.
-  const sourceFile =
-    (resolver !== undefined
+  // A resolver built from a BOM-bearing file carries the same skew, so prefer
+  // a fresh, BOM-free parse whenever the resolver's text does not match ours.
+  const fromResolver =
+    resolver !== undefined
       ? (resolver.getSourceFile(fileName) ?? resolver.getSourceFile(ts.sys.resolvePath(fileName)))
-      : undefined) ??
-    ts.createSourceFile(
-      fileName,
-      source,
-      ts.ScriptTarget.ESNext,
-      true,
-      ts.ScriptKind.JS,
-    );
+      : undefined;
+  const sourceFile =
+    fromResolver !== undefined && fromResolver.text === source
+      ? fromResolver
+      : ts.createSourceFile(
+          fileName,
+          source,
+          ts.ScriptTarget.ESNext,
+          true,
+          ts.ScriptKind.JS,
+        );
   const blocks = parseJsDocBlocks(source);
   const edits = new EditBuffer();
   const diagnostics: Diagnostic[] = [];
@@ -830,6 +841,22 @@ export function convertSource(
     }
     const names = thisFields.get(classNode) ?? new Set<string>();
     if (names.has(className)) {
+      return;
+    }
+    // Idempotency: when a previously converted file is fed back in, the
+    // promoted field (`v!: number;`) is already a real property declaration.
+    // Promoting again emits a second one -> TS2300 Duplicate identifier.
+    // Never re-promote a field the class already declares.
+    const alreadyDeclared = classNode.members.some(
+      (member) =>
+        (ts.isPropertyDeclaration(member) || ts.isPropertySignature(member)) &&
+        member.name !== undefined &&
+        ts.isIdentifier(member.name) &&
+        member.name.text === className,
+    );
+    if (alreadyDeclared) {
+      names.add(className);
+      thisFields.set(classNode, names);
       return;
     }
     names.add(className);
