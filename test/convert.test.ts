@@ -555,3 +555,46 @@ test('R17-19a: checkStrict includes DOM globals so console does not spuriously f
   const result = checkStrict('a.ts', "function f() { console.log('x'); }\n");
   assert.ok(result.ok, result.diagnostics.join('\n'));
 });
+
+// --- Review 0.1.17 batch 2: JSDoc / declaration reproductions ---
+test('R17b-9: @template constraint converts to a valid generic declaration', () => {
+  const out = convertSource('a.js',
+    '/**\n * @template T extends object\n * @param {T} x\n */\nfunction f(x) { return x; }',
+    { banner: false }).output;
+  assert.match(out, /function f<T extends object>\(x: T\)/);
+  assert.doesNotMatch(out, /<T, extends, object>/);
+  assert.doesNotMatch(out, /type T = unknown/);
+  assert.ok(checkStrict('a.ts', out).ok, checkStrict('a.ts', out).diagnostics.join('\n'));
+});
+
+test('R17b-11: lowercase @typedef {object} folds @property tags into the alias', () => {
+  const out = convertSource('a.js',
+    '/**\n * @typedef {object} Opts\n * @property {number} port\n */\n/** @param {Opts} o */ function f(o) { return o.port; }',
+    { banner: false }).output;
+  assert.match(out, /type Opts = \{ port: number; \}/);
+  assert.ok(checkStrict('a.ts', out).ok, checkStrict('a.ts', out).diagnostics.join('\n'));
+});
+
+test('R17b-12: @enum emits one type alias that coexists with the value', () => {
+  const out = convertSource('a.js',
+    '/** @enum {number} */\nconst Color = { RED: 0, BLUE: 1 };\n/** @param {Color} c */ function f(c) { return c; }',
+    { banner: false }).output;
+  assert.equal((out.match(/type Color/g) ?? []).length, 1);
+  assert.match(out, /type Color = number/);
+  assert.ok(checkStrict('a.ts', out).ok, checkStrict('a.ts', out).diagnostics.join('\n'));
+});
+
+test('R17b-13: an optional param followed by a required param stays legal', () => {
+  const out = convertSource('a.js',
+    '/**\n * @param {string} [a]\n * @param {number} b\n */\nfunction f(a, b) { return b; }',
+    { banner: false }).output;
+  assert.match(out, /function f\(a: string \| undefined, b: number\)/);
+  assert.doesNotMatch(out, /a\?: string, b:/);
+  assert.ok(checkStrict('a.ts', out).ok, checkStrict('a.ts', out).diagnostics.join('\n'));
+});
+
+test('R17b-18: a // comment between JSDoc and declaration keeps the doc bound', () => {
+  const out = convertSource('a.js', '/** @type {number} */\n// helper\nconst k = 1;', { banner: false }).output;
+  assert.match(out, /const k: number = 1/);
+  assert.ok(checkStrict('a.ts', out).ok, checkStrict('a.ts', out).diagnostics.join('\n'));
+});

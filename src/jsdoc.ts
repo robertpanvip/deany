@@ -8,6 +8,47 @@ interface BracedType {
 
 const TAG_LINE = /^@([A-Za-z][A-Za-z0-9]*)\b\s*([\s\S]*)$/;
 
+/** Known JSDoc tag names, used to find inline ` @tag` boundaries on one line. */
+const KNOWN_TAGS = new Set([
+  'param', 'returns', 'return', 'typedef', 'property', 'prop', 'callback',
+  'template', 'this', 'type', 'enum', 'extends', 'implements', 'constructor',
+  'class', 'memberof', 'readonly', 'abstract', 'override', 'deprecated',
+  'see', 'link', 'example', 'throws', 'exception', 'yields', 'augments',
+]);
+
+/**
+ * Split a single JSDoc line into multiple tag chunks when several tags appear
+ * inline. Scans for ` @name` (space + at + known tag name) at brace depth 0 so
+ * an `@` inside a `{...}` type or a word like `foo@bar` is not a boundary.
+ */
+function splitInlineTags(line: string): string[] {
+  const starts: number[] = [0];
+  let depth = 0;
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
+    if (ch === '{') depth += 1;
+    else if (ch === '}') depth = Math.max(0, depth - 1);
+    else if (ch === '@' && depth === 0 && (i === 0 || /\s/.test(line[i - 1] ?? ''))) {
+      const name = /^@([A-Za-z][A-Za-z0-9]*)\b/.exec(line.slice(i));
+      if (name !== null && KNOWN_TAGS.has(name[1] ?? '')) {
+        starts.push(i);
+      }
+    }
+  }
+  if (starts.length === 1) {
+    return [line];
+  }
+  const parts: string[] = [];
+  for (let i = 0; i < starts.length; i += 1) {
+    const end = i + 1 < starts.length ? starts[i + 1] : line.length;
+    const part = line.slice(starts[i], end).trim();
+    if (part.length > 0) {
+      parts.push(part);
+    }
+  }
+  return parts;
+}
+
 /** Split a JSDoc tag body into a leading balanced `{...}` type and the remainder. */
 function takeBracedType(body: string): BracedType | undefined {
   const text = body.trimStart();
@@ -273,10 +314,18 @@ export function parseJsDocBlocks(source: string): JsDocBlock[] {
       }
       const trimmed = line.trim();
       if (trimmed.startsWith('@')) {
-        const tag = parseTagLine(trimmed, text);
-        if (tag !== undefined) {
-          tags.push(tag);
-          seenTag = true;
+        // A single physical line can carry several JSDoc tags:
+        // `@param {number} a @param {string} b @returns {boolean}`. Split it at
+        // each ` @` boundary that begins a known tag so none are silently lost
+        // (review 0.1.17 P1-5). Descriptions containing a literal ` @` are rare
+        // in practice; anchoring to recognized tag names keeps false splits low.
+        const inlineTags = splitInlineTags(trimmed);
+        for (const part of inlineTags) {
+          const tag = parseTagLine(part, text);
+          if (tag !== undefined) {
+            tags.push(tag);
+            seenTag = true;
+          }
         }
         continue;
       }
@@ -305,7 +354,12 @@ export function parseJsDocBlocks(source: string): JsDocBlock[] {
   return blocks;
 }
 
-/** Return the JSDoc block that immediately precedes `node` (whitespace only in between). */
+/**
+ * Return the JSDoc block that immediately precedes `node`. Whitespace and
+ * intervening `//` line comments are allowed between the block and the
+ * declaration — a `// helper` note used to sever the association and drop the
+ * whole JSDoc (review 0.1.17 P1-18). A blank line is still just whitespace.
+ */
 export function leadingJsDoc(
   node: ts.Node,
   sourceFile: ts.SourceFile,
@@ -315,7 +369,7 @@ export function leadingJsDoc(
   const pos = node.getStart(sourceFile);
   let best: JsDocBlock | undefined;
   for (const block of blocks) {
-    if (block.end <= pos && /^\s*$/.test(source.slice(block.end, pos))) {
+    if (block.end <= pos && onlyWhitespaceAndLineComments(source.slice(block.end, pos))) {
       if (best === undefined || block.end > best.end) {
         best = block;
       }
@@ -324,11 +378,50 @@ export function leadingJsDoc(
   return best;
 }
 
-/** Names declared by a `@template T, U` tag. */
+/** True if a text slice contains only whitespace and `// ...` line comments. */
+function onlyWhitespaceAndLineComments(text: string): boolean {
+  let rest = text;
+  while (rest.length > 0) {
+    const lineEnd = rest.indexOf('\n');
+    const line = (lineEnd >= 0 ? rest.slice(0, lineEnd) : rest).trim();
+    if (line.length > 0 && !line.startsWith('//')) {
+      return false;
+    }
+    if (lineEnd < 0) {
+      break;
+    }
+    rest = rest.slice(lineEnd + 1);
+  }
+  return true;
+}
+
+/**
+ * Names declared by a `@template` tag. Each name may carry a TypeScript
+ * constraint via `extends`, e.g. `@template T extends object, U`. The whole
+ * `T extends object` must be kept as one type-parameter declaration — splitting
+ * on every space produced `f<T, extends, object>` (review 0.1.17 P1-9).
+ */
 export function parseTemplateNames(tag: JsDocTag): string[] {
-  const source = (tag.name ?? tag.description ?? '').trim();
-  return source
-    .split(/[\s,]+/)
-    .map((part) => part.replace(/^\{|\}$/g, '').trim())
-    .filter((part) => /^[A-Za-z_$][\w$]*$/.test(part));
+  let source = (tag.name ?? tag.description ?? '').trim();
+  // Strip a surrounding `{...}` if a tag was written as `@template {T}`.
+  source = source.replace(/^\{|\}$/g, '').trim();
+  // Split parameters on commas OR on whitespace, but keep `X extends Y` glued
+  // together. Treat `extends` as a join signal: rebuild tokens so that the word
+  // after `extends` attaches to the name before it.
+  const raw = source.split(/[\s,]+/).filter((part) => part.length > 0);
+  const params: string[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    const token = raw[i] ?? '';
+    if (token === 'extends') {
+      // Append the constraint (and any dotted generic args) to the last param.
+      const constraint = raw[i + 1];
+      if (constraint !== undefined && params.length > 0) {
+        params[params.length - 1] += ` extends ${constraint}`;
+        i += 1; // consumed the constraint token
+      }
+      continue;
+    }
+    params.push(token);
+  }
+  return params.filter((part) => /^[A-Za-z_$][\w$]*(?:\s+extends\s+[\w.<>|&,\s]+)?$/.test(part.trim()));
 }

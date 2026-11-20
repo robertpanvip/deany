@@ -91,3 +91,21 @@ test('R17-8b: a /**** banner at file offset 0 is not a JSDoc block', () => {
   // a genuine JSDoc at offset 0 must still parse.
   assert.equal(parseJsDocBlocks('/** @typedef {Real} T */\nlet x;').length, 1);
 });
+
+test('R17b-5: multiple JSDoc tags on one physical line are all parsed', () => {
+  const blocks = parseJsDocBlocks('/** @param {number} a @param {string} b @returns {boolean} */');
+  const tags = blocks[0]?.tags ?? [];
+  assert.deepEqual(tags.map((t) => t.tag), ['param', 'param', 'returns']);
+  assert.equal(tags[0]?.name, 'a');
+  assert.equal(tags[0]?.typeText, 'number');
+  assert.equal(tags[1]?.name, 'b');
+  assert.equal(tags[1]?.typeText, 'string');
+  assert.equal(tags[2]?.typeText, 'boolean');
+});
+
+test('R17b-9: @template T extends object stays one type parameter', () => {
+  const block = parseJsDocBlocks('/** @template T extends object, U */')[0];
+  const tag = block?.tags.find((t) => t.tag === 'template');
+  assert.ok(tag !== undefined);
+  assert.deepEqual(parseTemplateNames(tag), ['T extends object', 'U']);
+});

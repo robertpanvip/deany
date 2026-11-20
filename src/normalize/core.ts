@@ -1,14 +1,58 @@
 import { DEFAULT_OPTIONS } from '../types.js';
 import type { ConvertOptions } from '../types.js';
 
-/** Split on a separator while respecting nested generic/call/object brackets. */
+/** Normalize spacing around `|` / `&` outside quoted string literals. */
+function normalizeCompositeSpacing(text: string): string {
+  let out = '';
+  let quote: string | undefined;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i] ?? '';
+    if (quote !== undefined) {
+      out += ch;
+      if (ch === '\\' && i + 1 < text.length) {
+        out += text[i + 1] ?? '';
+        i += 1;
+      } else if (ch === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if (ch === '|' || ch === '&') {
+      out = out.replace(/\s+$/, '') + ` ${ch} `;
+      while (text[i + 1] === ' ') i += 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** Split on a separator while respecting nested brackets AND quoted strings. */
 export function splitTopLevel(text: string, separator: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let start = 0;
+  let quote: string | undefined;
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i] ?? '';
-    if (ch === '<' || ch === '(' || ch === '[' || ch === '{') {
+    if (quote !== undefined) {
+      // A `|` inside a string literal (`'a|b'`) is data, not a union separator.
+      // Ignore brackets too, so a brace inside a string cannot skew depth.
+      if (ch === '\\') {
+        i += 1;
+      } else if (ch === quote) {
+        quote = undefined;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      quote = ch;
+    } else if (ch === '<' || ch === '(' || ch === '[' || ch === '{') {
       depth += 1;
     } else if (ch === '>' || ch === ')' || ch === ']' || ch === '}') {
       depth = Math.max(0, depth - 1);
@@ -40,7 +84,10 @@ export function genericArguments(text: string, name: string): string[] | undefin
     const ch = text[i] ?? '';
     if (ch === '<') {
       depth += 1;
-    } else if (ch === '>') {
+    } else if (ch === '>' && text[i - 1] !== '=') {
+      // A `>` that closes an arrow (`=>`) is not a generic bracket. Without
+      // this guard `Object.<string, () => void>` closed at the arrow's `>` and
+      // emitted the truncated `Record<string, () =>` (review 0.1.17 P1-4).
       depth -= 1;
       if (depth === 0) {
         const tail = text.slice(start, i).trim();
@@ -101,8 +148,21 @@ export function convertFunctionType(text: string, options: ConvertOptions): stri
       const inner = normalizeJsDocType(part.slice(3), options);
       return `...arg${index}: ${inner}[]`;
     }
+    // JSDoc `function(this:Foo, ...)` / `function(new:Foo, ...)` use `this:`
+    // and `new:` as pseudo-parameter markers, not real parameter types. Emitting
+    // them as `arg0: this:Foo` is TS syntax noise (review 0.1.17 P1-7). A `this:`
+    // marker becomes a TypeScript `this` parameter; a `new:` marker is dropped
+    // from the value-signature params (it describes a construct signature, which
+    // TypeScript expresses via `new (...) => T` and is out of scope here).
+    const thisMarker = /^this\s*:\s*([\s\S]+)$/.exec(part);
+    if (thisMarker !== null) {
+      return `this: ${normalizeJsDocType(thisMarker[1] ?? options.defaultType, options)}`;
+    }
+    if (/^new\s*:/.test(part)) {
+      return undefined;
+    }
     return `arg${index}: ${normalizeJsDocType(part, options)}`;
-  });
+  }).filter((param): param is string => param !== undefined);
   const returns = normalizeJsDocType(returnsText.length > 0 ? returnsText : 'void', options);
   return `(${params.join(', ')}) => ${returns}`;
 }
@@ -155,9 +215,12 @@ export function joinComposite(members: readonly string[], separator: string): st
     .join(separator);
 }
 
-/** Wrap a union type in parentheses when an array suffix is appended. */
+/** Wrap a union / intersection / function type before appending `[]`. */
 export function appendArray(type: string): string {
-  if (type.includes('|') || type.includes('&')) {
+  // A bare `() => void` + `[]` parses as "function returning void[]" (semantic
+  // reversal), and a union `A | B` + `[]` binds to only the last member. Parenthesize
+  // any of these so the array applies to the whole type (review 0.1.17 P1-3/P2-2).
+  if (type.includes('|') || type.includes('&') || hasTopLevelArrow(type)) {
     return `(${type})[]`;
   }
   return `${type}[]`;
@@ -174,17 +237,33 @@ export function normalizeJsDocType(raw: string, options: ConvertOptions = DEFAUL
   if (type.length === 0) {
     return options.defaultType;
   }
+  // A trailing `=` is a JSDoc default-value artifact, not TypeScript syntax.
+  // `number=` / `Array.<T>=` used to leak through as TS1109 (review P1-6).
+  // Only strip a `=` at the very end that is not part of `=>`.
+  while (type.endsWith('=') && !type.endsWith('=>')) {
+    type = type.slice(0, -1).trimEnd();
+  }
+  if (type.length === 0) {
+    return options.defaultType;
+  }
 
   // JSDoc `module:Foo.Bar` / `module:Foo~Bar` namespace references. TypeScript has
   // no `module:` qualifier, so strip it down to the dotted/simple type path.
   // (Cross-file typedef resolution is not available per-file; see dangling aliases.)
   if (type.startsWith('module:')) {
-    type = type.slice('module:'.length).replace(/~/g, '.').trim();
+    // `module:fs/promises` and `module:fs~readFile` are Closure module refs;
+    // TypeScript has no `module:`, no `/` in a type name, and no `~`. Map both
+    // path separators to `.` so the result is a valid (namespaced) type path
+    // (review 0.1.17 P1-10).
+    type = type.slice('module:'.length).replace(/[~/]/g, '.').trim();
   }
 
   // JSDoc writes generics as `Array.<T>`; TypeScript writes `Array<T>`.
   type = type.replace(/\.<\s*/g, '<');
-  type = type.replace(/\s*\|\s*/g, ' | ').replace(/\s*&\s*/g, ' & ');
+  // Normalize spacing around union/intersection separators, but never inside a
+  // string literal — rewriting `'a|b'` to `'a | b'` silently changes the type's
+  // data (review 0.1.17 P1-2). splitTopLevel below is quote-aware too.
+  type = normalizeCompositeSpacing(type);
 
   // Split top-level unions/intersections first so each member (including a
   // `function(...)` type) is normalized independently. Without this, a type like
@@ -274,6 +353,24 @@ export function normalizeJsDocType(raw: string, options: ConvertOptions = DEFAUL
   const primitive = primitiveAliases[type];
   if (primitive !== undefined) {
     return primitive;
+  }
+
+  // A primitive with a `[]` suffix (`String[]`, `Number[][]`) must normalize the
+  // element too, not just bare `String`. Without this, `String[]` leaked a boxed
+  // `String[]` and `*[]` stayed an invalid loose type (review 0.1.17 P1-1).
+  const primitiveArray = /^(.+?)(\[\]+)$/.exec(type);
+  if (primitiveArray !== null) {
+    const element = primitiveArray[1] ?? '';
+    const suffix = primitiveArray[2] ?? '[]';
+    return `${normalizeJsDocType(element, options)}${suffix}`;
+  }
+
+  // Legacy JSDoc dotted generics: `Array.String` means `Array<String>`. The
+  // `.<` form was already rewritten above; the bare-dot form nested inside
+  // another generic (`Array<Array.String>`) still needs folding (P1-1).
+  const dottedArray = /^Array\.(.+)$/.exec(type);
+  if (dottedArray !== null) {
+    return `Array<${normalizeJsDocType(dottedArray[1] ?? options.defaultType, options)}>`;
   }
 
   const arrayArgs = genericArguments(type, 'Array');

@@ -156,3 +156,43 @@ test('R17-P2-1: normalizeJsDocType merges defaults for partial options', () => {
   assert.equal(normalizeJsDocType('?', {} as any), 'unknown');
   assert.equal(normalizeJsDocType('', {} as any), 'unknown');
 });
+
+// --- Review 0.1.17 batch 2: normalization reproductions ---
+test('R17b-1: capitalized/loose primitives with array suffixes normalize their element', () => {
+  const o = DEFAULT_OPTIONS;
+  assert.equal(normalizeJsDocType('String[]', o), 'string[]');
+  assert.equal(normalizeJsDocType('Number[][]', o), 'number[][]');
+  assert.equal(normalizeJsDocType('*[]', o), 'unknown[]');
+  assert.equal(normalizeJsDocType('Array<Array.String>', o), 'Array<Array<string>>');
+});
+
+test('R17b-2: a pipe inside a string literal is data, not a union separator', () => {
+  assert.equal(normalizeJsDocType("'a|b'", DEFAULT_OPTIONS), "'a|b'");
+  assert.equal(normalizeJsDocType("Array<'a|b'>", DEFAULT_OPTIONS), "Array<'a|b'>");
+});
+
+test('R17b-3: array shorthand parenthesizes function element types', () => {
+  const sh = { ...DEFAULT_OPTIONS, arrayShorthand: true };
+  assert.equal(normalizeJsDocType('Array.<function():void>', sh), '(() => void)[]');
+  assert.equal(normalizeRestType('...function(number): number', DEFAULT_OPTIONS), '((arg0: number) => number)[]');
+});
+
+test('R17b-4: a => inside generic args does not close the generic early', () => {
+  assert.equal(normalizeJsDocType('Object.<string, () => void>', DEFAULT_OPTIONS), 'Record<string, () => void>');
+  assert.equal(normalizeJsDocType('Object.<string, (x:number)=>void>', DEFAULT_OPTIONS), 'Record<string, (x:number)=>void>');
+});
+
+test('R17b-6: trailing default-value = is stripped', () => {
+  assert.equal(normalizeJsDocType('number=', DEFAULT_OPTIONS), 'number');
+  assert.equal(normalizeJsDocType('Array.<T>=', DEFAULT_OPTIONS), 'Array<T>');
+});
+
+test('R17b-7: function(this:/new:) markers do not leak as arg types', () => {
+  assert.equal(normalizeJsDocType('function(this:Foo)', DEFAULT_OPTIONS), '(this: Foo) => void');
+  assert.equal(normalizeJsDocType('function(new:Foo)', DEFAULT_OPTIONS), '() => void');
+});
+
+test('R17b-10: module: path separators become namespace dots', () => {
+  assert.equal(normalizeJsDocType('module:fs/promises', DEFAULT_OPTIONS), 'fs.promises');
+  assert.equal(normalizeJsDocType('module:fs~readFile', DEFAULT_OPTIONS), 'fs.readFile');
+});

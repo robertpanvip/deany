@@ -194,6 +194,31 @@ export function convertSource(
         edits.add(parens.open + 1, `this: ${thisType}${suffix}`);
       }
 
+      // TypeScript forbids a required parameter after an optional one (TS1016).
+      // JSDoc can express `@param {string} [a]` followed by `@param {number} b`;
+      // emitting `a?: string, b: number` is invalid. Compute the longest suffix
+      // of parameters that may be optional: a parameter can keep its `?` only if
+      // every parameter after it is also optional/rest/has a default. Earlier
+      // "optional" params degrade to required with a `| undefined` type instead.
+      const canBeOptional: boolean[] = [];
+      {
+        let suffixAllOptional = true;
+        for (let i = node.parameters.length - 1; i >= 0; i -= 1) {
+          const p = node.parameters[i];
+          const pName = p === undefined ? undefined : parameterName(p);
+          const pTag = pName === undefined ? undefined : paramTags.find((item) => item.name === pName);
+          const inherentlyOptional =
+            p !== undefined &&
+            (p.initializer !== undefined || p.dotDotDotToken !== undefined);
+          const isOptional = inherentlyOptional || pTag?.optional === true ||
+            (dtsSig?.params[i]?.optional === true && !inherentlyOptional);
+          canBeOptional[i] = suffixAllOptional && isOptional;
+          if (!isOptional) {
+            suffixAllOptional = false;
+          }
+        }
+      }
+
       for (let index = 0; index < node.parameters.length; index += 1) {
         const parameter = node.parameters[index];
         if (parameter === undefined) {
@@ -216,7 +241,8 @@ export function convertSource(
           const optional =
             dtsParam.optional &&
             parameter.initializer === undefined &&
-            parameter.dotDotDotToken === undefined;
+            parameter.dotDotDotToken === undefined &&
+            canBeOptional[index] === true;
           annotation = `${optional ? '?' : ''}: ${restType}`;
         }
         // `@param {string} [options.foo]` describes a field of `options`, not a
@@ -240,14 +266,21 @@ export function convertSource(
             tag !== undefined &&
             tag.optional &&
             parameter.initializer === undefined &&
-            parameter.dotDotDotToken === undefined;
+            parameter.dotDotDotToken === undefined &&
+            canBeOptional[index] === true;
           annotation = `${optional ? '?' : ''}: ${shape}`;
         } else if (annotation === undefined && tag?.typeText !== undefined) {
-          const type = parameter.dotDotDotToken || tag.variadic
+          let type = parameter.dotDotDotToken || tag.variadic
             ? normalizeRestType(tag.typeText, options)
             : normalizeJsDocType(tag.typeText, options);
-          const optional =
+          const wantedOptional =
             tag.optional && parameter.initializer === undefined && parameter.dotDotDotToken === undefined;
+          const optional = wantedOptional && canBeOptional[index] === true;
+          // An optional param that must degrade to required (because a required
+          // param follows it) keeps the "may be undefined" meaning via a union.
+          if (wantedOptional && !optional && !type.includes('undefined')) {
+            type = `${type} | undefined`;
+          }
           annotation = `${optional ? '?' : ''}: ${type}`;
         } else if (annotation === undefined) {
           const inferred = resolver?.infer(parameter);
@@ -605,7 +638,9 @@ export function convertSource(
         const type =
           tag.tag === 'callback'
             ? functionTypeFromCallback(block, options)
-            : tag.tag === 'typedef' && tag.typeText === 'Object' && properties.length > 0
+            : tag.tag === 'typedef' &&
+                (tag.typeText === 'Object' || tag.typeText === 'object') &&
+                properties.length > 0
               ? objectTypeFromProperties(properties, options)
               : typeForTaggedDeclaration(block, options) ??
                 normalizeJsDocType(tag.typeText ?? options.defaultType, options);
@@ -639,8 +674,14 @@ export function convertSource(
   for (const block of blocks) {
     for (const tag of block.tags) {
       if (tag.tag === 'template') {
-        for (const name of parseTemplateNames(tag)) {
-          templateNames.add(name);
+        for (const declaration of parseTemplateNames(tag)) {
+          // A declaration may be `T extends object`; the type-name referenced
+          // in `{T}` is just the leading identifier. Store that so fallback
+          // alias emission does not create a bogus `type T = unknown`.
+          const name = /^[A-Za-z_$][\w$]*/.exec(declaration);
+          if (name !== null) {
+            templateNames.add(name[0]);
+          }
         }
       }
     }
@@ -667,6 +708,28 @@ export function convertSource(
     ts.forEachChild(n, collectDeclaredName);
   };
   collectDeclaredName(sourceFile);
+  // A `@enum {number} const Color = {...}` declares a runtime VALUE named Color
+  // (a const). `@param {Color}` references that same name as a TYPE. Emit a real
+  // `type Color = number` alias (TS keeps type and value namespaces separate, so
+  // this coexists with the const) and mark the name locally declared so the
+  // generic `type Color = unknown` fallback is not also emitted (review P1-12).
+  for (const block of blocks) {
+    const enumTag = block.tags.find((tag) => tag.tag === 'enum');
+    if (enumTag === undefined) {
+      continue;
+    }
+    const after = source.slice(block.end);
+    const varMatch = /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(after);
+    if (varMatch !== null && (varMatch[1] ?? '').length > 0) {
+      const enumName = varMatch[1] ?? '';
+      localDeclaredNames.add(enumName);
+      const underlying = normalizeJsDocType(
+        enumTag.typeText ?? options.defaultType,
+        options,
+      );
+      edits.add(block.end, `\n\ntype ${enumName} = ${underlying};`);
+    }
+  }
   const dangling = new Set<string>();
   for (const block of blocks) {
     for (const tag of block.tags) {
