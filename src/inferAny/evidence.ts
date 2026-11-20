@@ -4,8 +4,8 @@ import type { Evidence, InferenceContext } from './types.js';
 import { controlFlowNarrowedType } from './controlFlow.js';
 import { addConstraint, addSource, addWeakSource, emptyEvidence } from './state.js';
 import { declaredTypeOf, isExportedParameter } from './publicApi.js';
-import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, REDUCER_METHODS, REDUCER_SIGNATURE, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES, nameSuggestsNumber, variableNameSuggestsType } from './constants.js';
-import { arrayElementTypeOf, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
+import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, REDUCER_METHODS, REDUCER_SIGNATURE, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES, functionNameSuggestsReturnType, nameSuggestsNumber, variableNameSuggestsType } from './constants.js';
+import { arrayElementTypeOf, functionLikeName, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
 import { customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsOf } from './shape.js';
 import { arithmeticNumberType, instanceTypeOf, orderableOperandType, symbolTypeText, typePredicateOfArgument, typeText } from './typeText.js';
 import { collectMutationEvidence, containerInstantiationFromMutations } from './mutation.js';
@@ -838,38 +838,45 @@ function collectedType(node: ts.Node, ctx: InferenceContext, depth: number): str
 }
 
 /** Collect type evidence for the declaration that owns an `any` annotation. */
+/** The enclosing function's name, for owner-level name hints. */
+function ownerFunctionName(owner: ts.Node): string | undefined {
+  if (isFunctionLike(owner)) {
+    return functionLikeName(owner);
+  }
+  if (ts.isParameter(owner)) {
+    return functionLikeName(owner.parent);
+  }
+  return undefined;
+}
+
 /**
- * Weak name-based numeric hint. Only a FUNCTION name counts: a parameter of
- * `add(a, b)` or the return of `sum()` inherits the hint from the enclosing
- * function. Variable names are intentionally NOT used — an initializer, when
- * present, is real evidence and a name alone (`const total = ...`) is too
- * weak / misleading. Returns false unless a clear numeric-accumulator verb is
- * found in the function name. (Review round 12 / idea 3.)
+ * Weak name-based numeric hint. Only a FUNCTION's PARAMETERS get this hint: a
+ * parameter of `add(a, b)` / `count(xs)` inherits it from the enclosing
+ * function. The function's own RETURN no longer takes a number from its name —
+ * round 15 splits name hints by role (boolean/array/string name -> return,
+ * numeric name -> parameters only). Variable names are intentionally NOT used:
+ * an initializer, when present, is real evidence and a bare name is too weak.
+ * Returns false unless a clear numeric-accumulator verb is found. (Rounds 12/15.)
  */
 function ownerHasNumericNameHint(owner: ts.Node): boolean {
-  let fnName: string | undefined;
-  if (isFunctionLike(owner)) {
-    const name = (owner as ts.SignatureDeclaration).name;
-    if (name !== undefined && ts.isIdentifier(name)) {
-      fnName = name.text;
-    }
-  } else if (ts.isParameter(owner) && isFunctionLike(owner.parent)) {
-    const name = (owner.parent as ts.SignatureDeclaration).name;
-    if (name !== undefined && ts.isIdentifier(name)) {
-      fnName = name.text;
-    }
-  }
-  return fnName !== undefined && nameSuggestsNumber(fnName);
+  const fnName = ownerFunctionName(owner);
+  return fnName !== undefined && ts.isParameter(owner) && nameSuggestsNumber(fnName);
 }
 
 export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0): Evidence {
   const evidence = emptyEvidence();
 
-  // Weak naming hint (lowest confidence): a numeric-accumulator function name
-  // suggests its parameters/return are numeric. Recorded as a flag and only
-  // consumed when NO real evidence exists — never outranks sources,
-  // constraints or properties. (Review round 12 / idea 3.)
+  // Weak naming hints (lowest confidence), consumed only when NO real evidence
+  // exists — never outrank sources, constraints or properties.
+  // - numeric-accumulator function name -> its PARAMETERS are numeric (round 12)
+  // - boolean/array/string function name -> its RETURN type (round 15)
   evidence.nameHintNumber = ownerHasNumericNameHint(owner);
+  if (isFunctionLike(owner) && !ts.isConstructorDeclaration(owner)) {
+    const fnName = ownerFunctionName(owner);
+    if (fnName !== undefined) {
+      evidence.nameHintReturnType = functionNameSuggestsReturnType(fnName);
+    }
+  }
 
   // Weak variable-name hint: a variable with NO initializer and no other name
   // evidence may get a low-confidence type from its name (`let names;` ->

@@ -40,6 +40,8 @@ export const REDUCER_SIGNATURE = '<T>(cb: (a: T, b: T, i: number) => T, init: T)
 export const NUMERIC_NAME_HINTS: ReadonlySet<string> = new Set([
   'add', 'sum', 'total', 'count', 'average', 'avg', 'increment', 'inc',
   'decrement', 'dec', 'max', 'min', 'sumof', 'addup', 'accumulate',
+  // Review round 15: additional unambiguous numeric-accumulator/index names.
+  'index', 'idx', 'length', 'size', 'age', 'number', 'amount', 'price', 'score',
 ]);
 
 /** Split an identifier into lowercase word tokens (`computeTotal` -> [compute, total]). */
@@ -54,6 +56,70 @@ export function nameTokens(name: string): string[] {
 /** True when a name weakly suggests a numeric accumulator/result. */
 export function nameSuggestsNumber(name: string): boolean {
   return nameTokens(name).some((token) => NUMERIC_NAME_HINTS.has(token));
+}
+
+/**
+ * Weak FUNCTION-name hints for a function's RETURN type. A getter/predicate
+ * name is a low-confidence signal about what the function hands back — weaker
+ * than any real return evidence (JSDoc, d.ts, a typed `return`, a call site).
+ * Grouped by the type they suggest. (Review round 15.)
+ *
+ * `get`/`list` prefixes are handled in `functionNameSuggestsReturnType`: a
+ * `get` prefix is stripped and the remaining tokens decide (so `getItems` ->
+ * array, `getName` -> string), while predicate prefixes (`is`/`has`/`can`/
+ * `should`) match boolean regardless of what follows (`hasItems` -> boolean,
+ * not an array).
+ */
+const FUNCTION_RETURN_NAME_HINTS: ReadonlyArray<{
+  readonly type: string;
+  readonly tokens: ReadonlySet<string>;
+}> = [
+  {
+    type: 'boolean',
+    tokens: new Set([
+      'ready', 'enabled', 'disabled', 'valid', 'invalid', 'flag', 'ok',
+      'success', 'found', 'empty', 'exists', 'visible',
+    ]),
+  },
+  {
+    type: 'unknown[]',
+    tokens: new Set([
+      'list', 'items', 'names', 'values', 'entries', 'collection',
+      'results', 'records', 'keys',
+    ]),
+  },
+  {
+    type: 'string',
+    tokens: new Set([
+      'name', 'text', 'title', 'url', 'path', 'message', 'label',
+      'description', 'str', 'content',
+    ]),
+  },
+];
+
+/** Predicate prefixes that make a function name boolean regardless of suffix. */
+const BOOLEAN_NAME_PREFIXES: ReadonlySet<string> = new Set([
+  'is', 'has', 'can', 'should', 'was', 'will',
+]);
+
+/**
+ * Weak return-type hint derived from a FUNCTION name, or `undefined` when the
+ * name gives no clear signal. Predicate prefixes win first (`isReady`,
+ * `hasItems` -> boolean); a leading `get` is stripped so `getItems` maps to the
+ * array group and `getName` to the string group; otherwise every token is
+ * checked against each group. Deliberately low-confidence: only consulted when
+ * the function has no real return evidence at all. (Review round 15.)
+ */
+export function functionNameSuggestsReturnType(name: string): string | undefined {
+  const tokens = nameTokens(name);
+  if (tokens.length === 0) return undefined;
+  if (tokens[0] !== undefined && BOOLEAN_NAME_PREFIXES.has(tokens[0])) return 'boolean';
+  const rest = tokens[0] === 'get' ? tokens.slice(1) : tokens;
+  if (rest.length === 0) return undefined;
+  for (const group of FUNCTION_RETURN_NAME_HINTS) {
+    if (rest.some((token) => group.tokens.has(token))) return group.type;
+  }
+  return undefined;
 }
 
 /**

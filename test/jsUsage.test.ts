@@ -6,6 +6,21 @@ import { test } from 'node:test';
 import * as ts from 'typescript';
 import { convertSource } from '../src/convert.js';
 import { createUsageResolver } from '../src/inferAny.js';
+import { checkStrict } from '../src/check.js';
+import { functionNameSuggestsReturnType } from '../src/inferAny/constants.js';
+
+/** Convert JS then verify the emitted TypeScript compiles under --strict. */
+function convertJsStrict(source: string): { output: string; strict: ReturnType<typeof checkStrict> } {
+  const output = convertJs(source);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'js-strict-'));
+  const file = path.join(dir, 'case.ts');
+  fs.writeFileSync(file, output, 'utf8');
+  try {
+    return { output, strict: checkStrict(file, output) };
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 const compilerOptions: ts.CompilerOptions = {
   allowJs: true,
@@ -243,4 +258,96 @@ function f(x) {
 `);
   assert.match(output, /function f\(x: Function \| boolean \| number \| string\): unknown/);
   assert.doesNotMatch(output, /\): (?:[^)]*\|[^)]*unknown|unknown \|)/);
+});
+
+// --- Round 15: function-name -> RETURN TYPE weak hints ---------------------
+
+test('R15-1: function-name return hints map boolean/array/string (+ get prefix)', () => {
+  // Predicate prefixes win; a `get` prefix is stripped before matching.
+  assert.equal(functionNameSuggestsReturnType('isReady'), 'boolean');
+  assert.equal(functionNameSuggestsReturnType('hasItems'), 'boolean');
+  assert.equal(functionNameSuggestsReturnType('canEdit'), 'boolean');
+  assert.equal(functionNameSuggestsReturnType('shouldRetry'), 'boolean');
+  assert.equal(functionNameSuggestsReturnType('enabled'), 'boolean');
+  assert.equal(functionNameSuggestsReturnType('valid'), 'boolean');
+  assert.equal(functionNameSuggestsReturnType('getItems'), 'unknown[]');
+  assert.equal(functionNameSuggestsReturnType('getNames'), 'unknown[]');
+  assert.equal(functionNameSuggestsReturnType('listUsers'), 'unknown[]');
+  assert.equal(functionNameSuggestsReturnType('getName'), 'string');
+  assert.equal(functionNameSuggestsReturnType('getText'), 'string');
+  assert.equal(functionNameSuggestsReturnType('getTitle'), 'string');
+  // Neutral names give no return hint.
+  assert.equal(functionNameSuggestsReturnType('combine'), undefined);
+  assert.equal(functionNameSuggestsReturnType('head'), undefined);
+});
+
+test('R15-2: boolean/array/string function names set the return type with an asserted opaque return', () => {
+  // The name decides the return; an opaque `return x` (implicit-any param ->
+  // unknown) gets an `as` assertion so the concrete return stays strict-legal.
+  const bool = convertJsStrict(`function isReady(x) { return x; }\n`);
+  assert.match(bool.output, /function isReady\(x: unknown\): boolean \{ return x as boolean; \}/);
+  assert.ok(bool.strict.ok, bool.strict.diagnostics.join('\n'));
+
+  const str = convertJsStrict(`function getName(o) { return o.name; }\n`);
+  assert.match(str.output, /function getName\(o: [^)]*\): string \{ return o\.name as string; \}/);
+  assert.ok(str.strict.ok, str.strict.diagnostics.join('\n'));
+
+  const arr = convertJsStrict(`function getItems(x) { return x; }\n`);
+  assert.match(arr.output, /function getItems\(x: unknown\): unknown\[\] \{ return x as unknown\[\]; \}/);
+  assert.ok(arr.strict.ok, arr.strict.diagnostics.join('\n'));
+});
+
+test('R15-3: real return evidence overrides the name hint (no bogus assertion)', () => {
+  // `return this.ready = true` gives a real boolean source; the name hint is
+  // not applied, so no `as` is inserted and the natural type stands.
+  const out = convertJs(`
+class C { constructor(){ this.ready = true; } isReady() { return this.ready; } }
+`);
+  assert.match(out, /isReady\(\): boolean \{ return this\.ready; \}/);
+  assert.doesNotMatch(out, /as boolean/);
+  // A `getItems` whose body returns a concrete boolean must NOT be forced to
+  // an array — real evidence wins over the name.
+  const conflict = convertJs(`function getItems() { return true; }\n`);
+  assert.match(conflict, /function getItems\(\): boolean/);
+  assert.doesNotMatch(conflict, /unknown\[\]/);
+});
+
+test('R15-4: numeric function names hint parameters only, never the return', () => {
+  // `count` is a numeric name: its parameter gets the number hint, but the
+  // return is NOT forced to number by the name (opaque `.length` stays unknown).
+  const count = convertJsStrict(`function count(items) { return items.length; }\n`);
+  assert.match(count.output, /function count\(items:/);
+  assert.doesNotMatch(count.output, /\): number/);
+  assert.ok(count.strict.ok, count.strict.diagnostics.join('\n'));
+  // sum(a,b) with `+`: parameters get number, the `+` has a number anchor, so
+  // the concrete number return is real evidence (round 13), not a name guess.
+  const sum = convertJsStrict(`function sum(a, b) { return a + b; }\n`);
+  assert.match(sum.output, /function sum\(a: number, b: number\): number/);
+  assert.ok(sum.strict.ok, sum.strict.diagnostics.join('\n'));
+});
+
+test('R15-5: expression-bodied arrow return hint is asserted too', () => {
+  const out = convertJsStrict(`const isReady = x => x;\n`);
+  assert.match(out.output, /const isReady = \(x: unknown\): boolean => x as boolean/);
+  assert.ok(out.strict.ok, out.strict.diagnostics.join('\n'));
+});
+
+test('R15-6: opaque-return assertion excludes nested function returns and handles composite/async', () => {
+  // The opaque value returned through a nested call is asserted; the nested
+  // function's own return is left to its own signature (no double assertion).
+  const nested = convertJsStrict(`function isReady(x){ return (function inner(v){ return v; })(x); }\n`);
+  assert.ok(nested.strict.ok, nested.strict.diagnostics.join('\n'));
+  assert.match(nested.output, /\) as boolean/);
+  // A compound expression is parenthesized before asserting.
+  const compound = convertJsStrict(`function getReady(a, b){ return a && b; }\n`);
+  assert.ok(compound.strict.ok, compound.strict.diagnostics.join('\n'));
+  // async: the assertion uses the inner type, the signature wraps in Promise.
+  const asyncCase = convertJsStrict(`async function isReady(x){ return x; }\n`);
+  assert.match(asyncCase.output, /Promise<boolean>\{ return x as boolean; \}/);
+  assert.ok(asyncCase.strict.ok, asyncCase.strict.diagnostics.join('\n'));
+  // Mixed concrete+opaque branches keep the honest `unknown` return (no name
+  // hint applied), so no assertion is injected.
+  const mixed = convertJsStrict(`function isReady(x){ if(x) return x; return false; }\n`);
+  assert.match(mixed.output, /\): unknown/);
+  assert.ok(mixed.strict.ok, mixed.strict.diagnostics.join('\n'));
 });

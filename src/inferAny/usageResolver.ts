@@ -1,8 +1,8 @@
 import * as ts from 'typescript';
 
 import type { InferenceContext, UsageResolver } from './types.js';
-import { isArrayTypeString, isFunctionLike } from './util.js';
-import { ARRAY_BUILTIN_MEMBERS, ITERATION_METHODS, REDUCER_METHODS, REDUCER_SIGNATURE } from './constants.js';
+import { functionLikeName, isArrayTypeString, isFunctionLike } from './util.js';
+import { ARRAY_BUILTIN_MEMBERS, ITERATION_METHODS, REDUCER_METHODS, REDUCER_SIGNATURE, functionNameSuggestsReturnType } from './constants.js';
 import { createContext, createTable } from './state.js';
 import { buildInferenceTable, ownerType } from './table.js';
 import { collectDeclarations } from './collect.js';
@@ -164,6 +164,10 @@ export function createUsageResolver(
       return symbol;
     },
     typeOf: (node) => typeText(ctx, node as ts.Expression),
+    functionNameReturnHint: (owner) => {
+      const name = functionLikeName(owner);
+      return name === undefined ? undefined : functionNameSuggestsReturnType(name);
+    },
     overridesBase: (member) => {
       const classDecl = member.parent;
       if (!ts.isClassDeclaration(classDecl) || classDecl.heritageClauses === undefined) {

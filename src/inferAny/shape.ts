@@ -411,6 +411,11 @@ export function mergeEvidence(evidence: Evidence): {
     // ambiguousAdd: a numeric-accumulator name is a more specific hint than
     // the generic "cannot tell from `+`" fallback. (Review round 12.)
     return { type: 'number', weak: true };
+  } else if (evidence.nameHintReturnType !== undefined) {
+    // Weak FUNCTION-name -> RETURN hint (no real evidence at all, e.g. an
+    // expression-bodied arrow `x => x`). Lowest confidence, marked weak.
+    // (Review round 15.)
+    return { type: evidence.nameHintReturnType, weak: true };
   } else if (evidence.nameHintType !== undefined) {
     // Weak variable-name hint (`let names;` -> `unknown[]`, `let isReady;` ->
     // `boolean`). Only reached with NO real source/constraint/property and no
@@ -469,6 +474,17 @@ export function mergeEvidence(evidence: Evidence): {
     // (Review round 13.)
     if (evidence.returnsAddExpression && members.every((m) => m === 'unknown')) {
       return { type: 'string | number', weak: true };
+    }
+    // A boolean/array/string FUNCTION name is a weak hint about its RETURN.
+    // Only when EVERY member is a bare `unknown` (no concrete sibling return)
+    // does the name decide — a concrete return (e.g. `isReady(){return 42}`)
+    // must never be overridden. The converter adds an `as` assertion on the
+    // opaque returns so this concrete annotation stays strict-legal. (R15.)
+    if (
+      evidence.nameHintReturnType !== undefined &&
+      members.every((m) => m === 'unknown')
+    ) {
+      return { type: evidence.nameHintReturnType, weak: true };
     }
     return { type: 'unknown', weak };
   }

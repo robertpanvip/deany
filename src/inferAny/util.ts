@@ -16,6 +16,31 @@ export function isFunctionLike(node: ts.Node): node is FunctionLikeWithBody {
   );
 }
 
+/**
+ * The name a function-like node is known by. Beyond an own identifier name,
+ * an anonymous arrow/function expression assigned to a variable or property
+ * (`const isReady = x => x`, `obj.getName = function(){}`) is named by that
+ * binding — a common shape for predicate/getter functions. Used only for weak
+ * name hints, never for real type evidence. (Review round 15.)
+ */
+export function functionLikeName(node: ts.Node): string | undefined {
+  if (!isFunctionLike(node)) return undefined;
+  const own = (node as ts.SignatureDeclaration).name;
+  if (own !== undefined && ts.isIdentifier(own)) return own.text;
+  const parent = node.parent;
+  if (parent !== undefined && ts.isVariableDeclaration(parent) && ts.isIdentifier(parent.name)) {
+    return parent.name.text;
+  }
+  if (
+    parent !== undefined &&
+    ts.isPropertyAssignment(parent) &&
+    ts.isIdentifier(parent.name)
+  ) {
+    return parent.name.text;
+  }
+  return undefined;
+}
+
 /** True only if the single matching paren for index 0 closes at the very end. */
 export function wrappedInOuterParens(type: string): boolean {
   if (!type.startsWith('(') || !type.endsWith(')')) {

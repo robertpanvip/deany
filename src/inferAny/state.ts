@@ -53,6 +53,7 @@ export function emptyEvidence(): Evidence {
     stringContext: false,
     ambiguousAdd: false,
     nameHintNumber: false,
+    nameHintReturnType: undefined,
     returnsAddExpression: false,
     nameHintType: undefined,
   };

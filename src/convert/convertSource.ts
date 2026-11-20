@@ -131,6 +131,87 @@ export function convertSource(
       warn(`@returns is ignored on ${describe(node)} (generator/constructor/setter).`, doc?.start ?? 0);
     }
 
+    // A concrete return type that came purely from the function's NAME (a weak
+    // boolean/array/string hint) must not fight an opaque `return` expression:
+    // `function isReady(x){ return x; }` annotated `: boolean` would emit TS2322
+    // (unknown not assignable to boolean). When the inferred return equals the
+    // name hint, assert each opaque return expression to that type. Expressions
+    // that already carry a real type are left alone (`return true` needs no
+    // assertion). This keeps the semantic name hint AND strict mode. (R15.)
+    if (
+      returnAnnotation !== undefined &&
+      resolver !== undefined &&
+      !skipReturn &&
+      !hasExplicitReturnType &&
+      returnTag === undefined &&
+      dtsSig?.returnType === undefined
+    ) {
+      const hint = resolver.functionNameReturnHint(node);
+      // Strip the leading ': ' and any `Promise<...>` async wrapper — the
+      // asserted expression yields the inner type, not the wrapped one.
+      const annotated = returnAnnotation.slice(2);
+      if (hint !== undefined && (annotated === hint || annotated.startsWith(`Promise<${hint}>`))) {
+        // An expression is opaque when its type cannot be named concretely —
+        // undefined (checker could not resolve), or a bare top/bottom type that
+        // is not assignable to the concrete name-hinted return.
+        const isOpaque = (type: string | undefined): boolean =>
+          type === undefined ||
+          type === 'unknown' ||
+          type === 'any' ||
+          type === 'never' ||
+          type === 'void';
+        // Add `as <hint>` to an expression. Primary/postfix expressions bind
+        // tighter than `as`, so no parentheses are needed; compound forms
+        // (binary/conditional/arrow/assignment) are wrapped to avoid changing
+        // the expression's meaning.
+        const assertExpression = (expr: ts.Expression): void => {
+          const needsParens = !(
+            ts.isIdentifier(expr) ||
+            ts.isPropertyAccessExpression(expr) ||
+            ts.isElementAccessExpression(expr) ||
+            ts.isCallExpression(expr) ||
+            ts.isNewExpression(expr) ||
+            ts.isLiteralExpression(expr) ||
+            ts.isParenthesizedExpression(expr) ||
+            ts.isAsExpression(expr) ||
+            ts.isNonNullExpression(expr) ||
+            ts.isTypeAssertionExpression(expr) ||
+            ts.isArrayLiteralExpression(expr) ||
+            ts.isObjectLiteralExpression(expr)
+          );
+          if (ts.isAsExpression(expr)) {
+            // Already asserted — leave it alone rather than stacking asserts.
+            return;
+          }
+          const start = expr.getStart(sourceFile);
+          if (needsParens) edits.add(start, '(');
+          edits.add(expr.end, needsParens ? `) as ${hint}` : ` as ${hint}`);
+        };
+        const assertOpaqueReturns = (body: ts.Node): void => {
+          const visitReturn = (n: ts.Node): void => {
+            // Do not descend into nested functions: their returns belong to
+            // their own signature, not this one.
+            if (n !== body && isFunctionLike(n)) return;
+            if (ts.isReturnStatement(n) && n.expression !== undefined) {
+              if (isOpaque(resolver.typeOf(n.expression))) {
+                assertExpression(n.expression);
+              }
+            }
+            ts.forEachChild(n, visitReturn);
+          };
+          visitReturn(body);
+        };
+        if (node.body !== undefined) {
+          if (ts.isBlock(node.body)) {
+            assertOpaqueReturns(node.body);
+          } else if (isOpaque(resolver.typeOf(node.body))) {
+            // Expression-bodied arrow: the whole body is the returned value.
+            assertExpression(node.body);
+          }
+        }
+      }
+    }
+
     const usedTags = new Set<JsDocTag>();
 
     if (unparenthesizedArrow) {

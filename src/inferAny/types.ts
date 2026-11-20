@@ -174,6 +174,14 @@ export interface Evidence {
    */
   nameHintNumber: boolean;
   /**
+   * Weak return-type hint derived from a FUNCTION name (`isReady` -> boolean,
+   * `getItems` -> unknown[], `getName` -> string). Lowest confidence: consulted
+   * only when the function has no concrete return evidence. When it replaces an
+   * opaque `unknown` return, the converter inserts an `as` assertion on those
+   * returns so the annotated concrete return stays strict-legal. (Round 15.)
+   */
+  nameHintReturnType: string | undefined;
+  /**
    * True when a function body's returned expression is a `+` operation. JS
    * `+` yields either a number (numeric addition) or a string (concatenation),
    * so when no real return evidence exists the return falls back to
@@ -216,6 +224,14 @@ export interface UsageResolver {
    * named, so callers can keep the binding un-annotated rather than guess.
    */
   readonly typeOf: (node: ts.Node) => string | undefined;
+  /**
+   * The weak return-type hint derived purely from a function's NAME (boolean /
+   * array / string), independent of real evidence. The converter compares this
+   * with the inferred return: when they match, the concrete return came from
+   * the name hint and opaque `return` expressions need an `as` assertion to
+   * stay strict-legal. (Review round 15.)
+   */
+  readonly functionNameReturnHint: (owner: ts.Node) => string | undefined;
   /**
    * True if `param` has no contextual type and resolves to `any`, i.e. the
    * parameter would trigger `noImplicitAny` (TS7006). Used to annotate only
