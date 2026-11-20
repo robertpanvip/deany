@@ -70,6 +70,30 @@ function bare(): any { return; }
   assert.match(output, /function bare\(\): void/);
 });
 
+test('recovers a concrete return type from an || fallback when the checker goes opaque', () => {
+  // `Symbol.observable` is non-standard: checkJs types the whole logical
+  // expression as `any`, but the `|| '@@observable'` fallback is a concrete
+  // string value. The function must return `string`, not `unknown` (which made
+  // the binding `PropertyKey = ...unknown` fail TS2322). This is observed
+  // evidence only — deany still does not fabricate a `Symbol.observable` decl.
+  const { output, cleanup } = convertGuardJs(`
+var $$observable = (function () {
+  return typeof Symbol === 'function' && Symbol.observable || '@@observable';
+})();
+function key(o) { return o[$$observable]; }
+module.exports = key;
+`);
+  try {
+    assert.match(
+      output,
+      /\(function \(\): string \{\s*return typeof Symbol === 'function' && Symbol\.observable \|\| '@@observable';\s*\}\)\(\)/,
+    );
+    assert.doesNotMatch(output, /function \(\): unknown/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('wraps inferred returns in Promise for async functions', () => {
   const { output } = infer(`
 async function noop(): any { await Promise.resolve(1); }

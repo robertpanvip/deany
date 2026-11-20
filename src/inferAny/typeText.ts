@@ -121,6 +121,31 @@ export function objectConstructorResult(ctx: InferenceContext, node: ts.Node): s
   return INDEXABLE_OBJECT;
 }
 
+/**
+ * `a || fallback` / `a ?? fallback`: the right operand is a value the
+ * expression genuinely produces when the left is falsy. When the checker types
+ * the whole logical expression as `any`/`unknown` — typically because the left
+ * side references an API lib.d.ts does not declare (e.g. the non-standard
+ * `Symbol.observable`, which TS2339-poison to `any`) — that fallback is the only
+ * concrete evidence available. Use its type instead of degrading to bare
+ * `unknown`. This is observed evidence, never a fabricated type: it only fires
+ * when the checker gave up AND the fallback has a concrete type of its own.
+ * (A normal `T | null || fallback` never reaches here because the checker
+ * already produced a concrete union type.)
+ */
+function logicalFallbackType(ctx: InferenceContext, node: ts.Node): string | undefined {
+  if (!ts.isBinaryExpression(node)) return undefined;
+  const op = node.operatorToken.kind;
+  if (op !== ts.SyntaxKind.BarBarToken && op !== ts.SyntaxKind.QuestionQuestionToken) return undefined;
+  const leftType = ctx.checker.getTypeAtLocation(node.left);
+  if ((leftType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return undefined;
+  const fallback = typeText(ctx, node.right);
+  if (fallback === undefined || fallback === 'any' || fallback === 'unknown' || fallback === 'never') {
+    return undefined;
+  }
+  return fallback;
+}
+
 export function typeText(
   ctx: InferenceContext,
   node: ts.Node,
@@ -132,6 +157,7 @@ export function typeText(
     return (
       objectConstructorResult(ctx, node) ??
       resolveViaTable(ctx, node) ??
+      logicalFallbackType(ctx, node) ??
       builtinCallResultFromReceiver(ctx, node)
     );
   }
