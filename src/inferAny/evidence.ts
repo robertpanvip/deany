@@ -1041,7 +1041,27 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0
         // satisfies, instead of a generic `(...args: unknown[])` that cannot
         // accept a narrowed callback (TS2345).
         const callbackSig = opaqueCallbackSignature(argument, ctx, depth);
-        const evidenceType = callbackSig ?? typeText(ctx, argument);
+        let evidenceType = callbackSig ?? typeText(ctx, argument);
+        // A call-site empty-array literal (`f([], items)`) has checker type
+        // `never[]`. Taken as a strong source for the parameter it freezes the
+        // parameter at `Array<never>`, so every later `param.push(x)` inside
+        // the callee fails with TS2345 ("number not assignable to never").
+        // This is the call-site counterpart of the initializer empty-array
+        // widening above (and review 0.1.17 P1-16): use the parameter's own
+        // covariant `push`/index writes to synthesize `Array<T>`, or fall back
+        // to the strict-safe `Array<unknown>` when every write is opaque.
+        // Never invent a concrete element type — only real writes qualify.
+        if (
+          callbackSig === undefined &&
+          ts.isArrayLiteralExpression(argument) &&
+          argument.elements.length === 0 &&
+          evidenceType !== undefined &&
+          /^(Array<never>|never\[\])$/.test(evidenceType)
+        ) {
+          const writes = collectMutationEvidence(owner, 'collection', ctx);
+          const element = mergeMutationEvidence(undefined, writes.filter((t) => t !== 'never'));
+          evidenceType = element !== undefined ? `Array<${element}>` : 'Array<unknown>';
+        }
         if (weakCallSites) {
           addWeakSource(evidence, evidenceType);
         } else {

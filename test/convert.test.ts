@@ -538,6 +538,35 @@ test('R17-16: an empty-array field widens to Array<unknown>, not Array<never>', 
   assert.ok(strict.ok, strict.diagnostics.join('\n'));
 });
 
+test('R10-1: call-site empty array does not freeze a parameter at Array<never>', () => {
+  // `addAll([], [1,2,3])` used to give `arr` the strong source `never[]` from
+  // the `[]` argument, so `arr.push(i)` failed with TS2345 ("number not
+  // assignable to never"). The call-site empty-array literal must get the same
+  // widening as an initializer empty array: synthesize Array<T> from the
+  // callee's own push writes, or the safe Array<unknown> fallback.
+  const out = convertJsWithResolver('a.js', [
+    'export function addAll(arr, items) { for (const i of items) { arr.push(i); } return arr; }',
+    'addAll([], [1, 2, 3]);',
+  ].join('\n'));
+  assert.doesNotMatch(out, /Array<never>/);
+  assert.match(out, /function addAll\(arr: Array<unknown>/);
+  const strict = checkStrict('a.ts', out);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R10-2: call-site empty array + concrete push widens to the written element type', () => {
+  // When the callee pushes a concrete literal, the call-site `[]` must still
+  // widen from the real write rather than freezing at `never[]`.
+  const out = convertJsWithResolver('a.js', [
+    'export function collect(xs) { xs.push("x"); return xs; }',
+    'collect([]);',
+  ].join('\n'));
+  assert.match(out, /function collect\(xs: Array<string>/);
+  assert.doesNotMatch(out, /Array<never>/);
+  const strict = checkStrict('a.ts', out);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
 test('R17-14: an argument passed to a rest parameter takes the element type', () => {
   // console.log(msg) / Math.max(v,1) used to make msg: any[] / v: number[]
   // (TS2345). The rest slot constrains to the ELEMENT type, not the array.
