@@ -598,3 +598,28 @@ test('R17b-18: a // comment between JSDoc and declaration keeps the doc bound', 
   assert.match(out, /const k: number = 1/);
   assert.ok(checkStrict('a.ts', out).ok, checkStrict('a.ts', out).diagnostics.join('\n'));
 });
+
+// --- Review 0.1.17 batch 3: data-loss protection ---
+test('R17c-4: batch conversion refuses to overwrite a hand-written .ts (P0-4)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'overwrite-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'a.js'), 'function f(a){return a}\n', 'utf8');
+    fs.writeFileSync(path.join(dir, 'a.ts'), '// MY HANDWRITTEN TS\nexport const keep = 42;\n', 'utf8');
+    // Default: skip the hand-written target with a clear error, keep its bytes.
+    const skipped = convertPath(dir, dir, { banner: true });
+    assert.equal(skipped.written.length, 0);
+    assert.equal(skipped.errors.length, 1);
+    assert.match(skipped.errors[0]?.message ?? '', /refusing to overwrite.*use --force/);
+    assert.match(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8'), /MY HANDWRITTEN/);
+    // --force: overwrite.
+    const forced = convertPath(dir, dir, { banner: true }, undefined, true, true);
+    assert.equal(forced.written.length, 1);
+    assert.doesNotMatch(fs.readFileSync(path.join(dir, 'a.ts'), 'utf8'), /MY HANDWRITTEN/);
+    // Re-running on our own generated output is allowed without force (idempotent).
+    const again = convertPath(dir, dir, { banner: true });
+    assert.equal(again.written.length, 1);
+    assert.equal(again.errors.length, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
