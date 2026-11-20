@@ -20,28 +20,38 @@ import { callsOf, referencesOf } from './collect.js';
  * possible fall-through, which only ever widens the type (safe).
  */
 /**
- * For a call-argument spread `f(...x)`, resolve the callee's rest parameter
- * through the checker and return an array-type constraint for `x` (e.g.
- * `number[]` for `Math.max(...x)`, `string[]` for a shadowed local with a
- * `...xs: string[]` rest). Returns undefined when no rest parameter can be
- * resolved, so the caller can fall back to `unknown[]`.
+ * For a call-argument spread `f(...x)` (or constructor spread `new C(...x)`),
+ * resolve the callee's signature through the checker and return the constraint
+ * the spread argument `x` must satisfy:
+ *
+ *  - rest signature (`...xs: number[]`) -> `number[]` (element type);
+ *  - fixed-argument signature (`(a: number, b: string)`) -> a tuple
+ *    `[number, string]`, because TypeScript only accepts a spread into fixed
+ *    parameters when the argument is a tuple (TS2556 for a plain array);
+ *  - optional parameters keep their `?` tuple marker;
+ *  - zero resolvable information -> undefined, so the caller falls back to
+ *    `unknown[]` (still an array, so the spread stays legal).
  *
  * Using the resolved signature — rather than the callee's source text — is
  * essential: a locally shadowed `Math.max` must not inherit the global one's
- * `number[]` contract (Architecture review 5).
+ * `number[]` contract (Architecture review 5). Sharing this logic between
+ * calls and `new` expressions fixes the constructor-spread gap (review R5-1).
  */
-function spreadCallConstraint(call: ts.CallExpression, ctx: InferenceContext): string | undefined {
+function spreadCallConstraint(
+  call: ts.CallExpression | ts.NewExpression,
+  ctx: InferenceContext,
+): string | undefined {
   const signature = ctx.checker.getResolvedSignature(call);
   if (signature === undefined) {
     return undefined;
   }
+
+  // 1) Rest signature: the array's element type is the definite constraint.
   for (const parameter of signature.parameters) {
     const declaration = parameter.declarations?.[0];
     if (declaration === undefined || !ts.isParameter(declaration) || declaration.dotDotDotToken === undefined) {
       continue;
     }
-    // The rest parameter's type is an array/tuple; its element type is what
-    // each spread element must be assignable to.
     const restType = ctx.checker.getTypeOfSymbolAtLocation(parameter, call);
     // Arrays and tuples are both TypeReference in the checker's model.
     const elementType =
@@ -59,7 +69,39 @@ function spreadCallConstraint(call: ts.CallExpression, ctx: InferenceContext): s
     // spread itself stays legal, without asserting an element type.
     return 'unknown[]';
   }
-  return undefined;
+
+  // 2) Fixed-argument signature: TS requires a tuple for an argument spread.
+  //    Build one from the resolved parameter types, preserving optionality.
+  if (signature.parameters.length === 0) {
+    return undefined; // zero-arg callee: any array spreads legally
+  }
+  const elements: string[] = [];
+  for (const parameter of signature.parameters) {
+    const parameterType = ctx.checker.getTypeOfSymbolAtLocation(parameter, call);
+    let text = widenedTypeText(ctx.checker, parameterType, call);
+    const declaration = parameter.declarations?.[0];
+    const optional =
+      declaration !== undefined &&
+      ts.isParameter(declaration) &&
+      (declaration.questionToken !== undefined || declaration.initializer !== undefined);
+    if (text === undefined || text === 'never' || text === 'any') {
+      text = 'unknown';
+    }
+    // A widened optional parameter reads `T | undefined`; a tuple's `?`
+    // marker already carries that, so strip it to keep `T?` well-formed.
+    if (optional) {
+      text = text
+        .replace(/\s*\|\s*undefined\b/g, '')
+        .replace(/\bundefined\s*\|\s*/g, '');
+      if (text === '' || text === 'undefined') {
+        text = 'unknown';
+      }
+      elements.push(`${text}?`);
+    } else {
+      elements.push(text);
+    }
+  }
+  return `[${elements.join(', ')}]`;
 }
 
 function statementsMayFallThrough(statements: readonly ts.Statement[]): boolean {
@@ -414,13 +456,12 @@ export function constraintsFromReference(
     !ts.isObjectLiteralExpression(parent.parent)
   ) {
     const call = parent.parent;
-    if (ts.isCallExpression(call)) {
-      // Resolve the callee's signature through the checker (NOT by callee name):
-      // a locally shadowed `Math.max` must not inherit the global's number[].
-      // The rest parameter's element type gives a definite contravariant
-      // constraint (e.g. `...values: number[]` → constrain the argument to
-      // `number[]`). Without it the element stays `unknown` and the spread is
-      // TS2345. Fall back to `unknown[]` (an array, so spread stays legal).
+    if (ts.isCallExpression(call) || ts.isNewExpression(call)) {
+      // Resolve the callee/constructor signature through the checker (NOT by
+      // name): a locally shadowed `Math.max` must not inherit the global's
+      // number[]. Rest signatures yield the element type; fixed-argument
+      // signatures yield a tuple (else TS2556). `new C(...x)` shares the same
+      // path. Fall back to `unknown[]` so the spread stays legal (review R5-1).
       addConstraint(evidence, spreadCallConstraint(call, ctx) ?? 'unknown[]');
     } else {
       // Array / iterable spread — Iterable is sufficient and more permissive.

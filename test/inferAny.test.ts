@@ -1538,3 +1538,63 @@ test('R4-3b: a d.ts constructor signature is restored onto the class constructor
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+// --- Review round 5: spread tuples, constructor spread, d.ts variable identity ---
+test('R5-1a: a spread into a fixed-arity function infers a tuple, not unknown[]', () => {
+  // Plain `unknown[]` spread into `(a: number, b: string)` is TS2556; the
+  // argument must be a tuple. Previously spreadCallConstraint only looked at
+  // rest parameters and fell back to `unknown[]` here.
+  const { output } = infer(`function target(a: number, b: string): void {}\nfunction invoke(args: any) { target(...args); }\n`);
+  assert.match(output, /function invoke\(args: \[number, string\]\)/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R5-1b: a constructor spread infers the same tuple as a call spread', () => {
+  // `new C(...x)` used to fall into the iterable branch (`Iterable<unknown>`),
+  // which is not a legal argument spread. It must share the signature logic.
+  const { output } = infer(`class Widget { constructor(a: number, b: string) {} }\nfunction build(args: any) { return new Widget(...args); }\n`);
+  assert.match(output, /function build\(args: \[number, string\]\)/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R5-1c: optional parameters keep their optional tuple marker', () => {
+  const { output } = infer(`function f(a: number, b?: string): void {}\nfunction invoke(args: any) { f(...args); }\n`);
+  assert.match(output, /function invoke\(args: \[number, string\?\]\)/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R5-1d: a rest signature still infers the element array, not a tuple', () => {
+  // Guard the existing rest-parameter path against the tuple rewrite.
+  const { output } = infer(`function sum(...values: number[]): number { return values.reduce((a, b) => a + b, 0); }\nfunction call(values: any) { return sum(...values); }\n`);
+  assert.match(output, /function call\(values: number\[\]\)/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R5-2: a sibling d.ts variable contract does not leak onto a same-named local', () => {
+  // Only the module-level `export const config` is the public contract. The
+  // local `config` inside run() must be inferred from its own usage; matching
+  // by spelling alone used to inject Record<string,string> and make
+  // `config.local = 1` a TS2322.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r5-var-dts-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(api, `export const config: any = {};\nexport function run(): object { const config: any = {}; config.local = 1; return config; }\n`, 'utf8');
+  fs.writeFileSync(dts, `export declare const config: Record<string, string>;\nexport declare function run(): object;\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const out = results.find((r) => r.fileName === api)?.output ?? '';
+    assert.match(out, /export const config: Record<string, string>/); // export keeps its contract
+    // Exactly one variable carries the d.ts contract — the exported one. The
+    // (non-exported) local must not get it too.
+    assert.equal((out.match(/Record<string, string>/g) ?? []).length, 1);
+    assert.match(out, /const config: \{ local\?: number; \} = \{\};/); // local inferred from assignment
+    const strict = checkStrict(api, out);
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

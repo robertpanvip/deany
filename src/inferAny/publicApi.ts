@@ -147,6 +147,14 @@ export function declaredTypeOf(
   }
 
   if (ts.isVariableDeclaration(owner) && ts.isIdentifier(owner.name)) {
+    // A sibling .d.ts is the MODULE'S PUBLIC CONTRACT. A same-named local
+    // variable inside a function body (`function run(){ const config: any=... }`)
+    // is not that export, so a name match alone must not apply its declared
+    // type. Gate on symbol-backed export status (R5-2): the module-level
+    // `export const config` still gets its contract; the inner local does not.
+    if (checker !== undefined && !isExportedDeclaration(owner, checker)) {
+      return undefined;
+    }
     return provider.variables.get(owner.name.text);
   }
 
@@ -334,7 +342,10 @@ function declarationTarget(node: ts.Node): ts.Node | undefined {
     isClassMember(node) ||
     isFunctionLikeNode(node) ||
     ts.isClassDeclaration(node) ||
-    ts.isClassExpression(node)
+    ts.isClassExpression(node) ||
+    // Variables have their own d.ts contract (provider.variables). Recognise
+    // them so the export gate can be applied by symbol identity too (R5-2).
+    ts.isVariableDeclaration(node)
   ) {
     return node;
   }
@@ -377,7 +388,7 @@ function isDefaultExportExpression(node: ts.Node): boolean {
   );
 }
 
-/** For arrow/function expressions, the export modifier lives on the variable. */
+/** For arrow/function expressions and variables, the export modifier lives on the enclosing variable statement. */
 function enclosingNamedDeclaration(node: ts.Node): ts.Node | undefined {
   if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && ts.isVariableDeclaration(node.parent)) {
     const list = node.parent.parent;
@@ -385,6 +396,15 @@ function enclosingNamedDeclaration(node: ts.Node): ts.Node | undefined {
       return list.parent;
     }
     return node.parent;
+  }
+  // `export const x = ...`: the modifier is on VariableStatement, two parents
+  // up. A local `const x` has the same shape but no export modifier, so the
+  // modifier + symbol-export checks below correctly distinguish them (R5-2).
+  if (ts.isVariableDeclaration(node)) {
+    const list = node.parent;
+    if (ts.isVariableDeclarationList(list) && ts.isVariableStatement(list.parent)) {
+      return list.parent;
+    }
   }
   return node;
 }

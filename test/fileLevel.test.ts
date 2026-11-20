@@ -233,6 +233,32 @@ test('file-level: inference is deterministic across independent runs', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 8b. review round 5: d.ts variable identity + spread/constructor tuples
+// ---------------------------------------------------------------------------
+test('file-level: d.ts variable contract stays on the export; spreads become tuples', () => {
+  const { dir, paths } = stage('dts-variable/api.ts', 'dts-variable/api.d.ts');
+  try {
+    const [implFile, dtsFile] = paths;
+    const [result] = inferAnyInProject([implFile, dtsFile], tsCompilerOptions);
+    assert.ok(result !== undefined);
+    assertStrict(implFile, result.output);
+
+    const out = result.output;
+    // The exported `config` keeps its d.ts contract; the same-named local in
+    // run() is inferred from its own write, not leaked the contract (R5-2).
+    assert.match(out, /export const config: Record<string, string>/);
+    assert.equal((out.match(/Record<string, string>/g) ?? []).length, 1);
+    assert.match(out, /const config: \{ local\?: number; \} = \{\};/);
+    // Both the call spread and the constructor spread resolve to the target
+    // signature's fixed-argument tuple (R5-1a/b).
+    assert.match(out, /function invoke\(args: \[number, string\]\)/);
+    assert.match(out, /function build\(args: \[number, string\]\)/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 8. mixed multi-file project: all emitted files stay strict-clean together
 // ---------------------------------------------------------------------------
 test('file-level: a mixed multi-file project emits all strict-clean files without cross-talk', () => {
