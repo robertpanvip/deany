@@ -224,6 +224,23 @@ test('generated tsconfig is strict and scriptc friendly', () => {
   assert.equal(parsed.compilerOptions['noImplicitAny'], true);
 });
 
+test('R10-3: CommonJS tsconfig drops verbatimModuleSyntax so emitted exports compile', () => {
+  // verbatimModuleSyntax + a CommonJS emit rejects every top-level `export`
+  // with TS1287. deany emits `export`, so a generated CommonJS config must
+  // drop that flag or it can never compile (review P1-21).
+  const parse = (module: string) =>
+    (JSON.parse(strictTsConfig({ module })) as { compilerOptions: Record<string, unknown> }).compilerOptions;
+  assert.equal(parse('CommonJS')['verbatimModuleSyntax'], false);
+  assert.equal(parse('NodeNext')['verbatimModuleSyntax'], false);
+  assert.equal(parse('ESNext')['verbatimModuleSyntax'], true);
+
+  // Verify the generated CommonJS config actually type-checks an exported
+  // declaration — the exact case that produced TS1287 before the fix.
+  const opts = ts.convertCompilerOptionsFromJson(parse('CommonJS'), '/workspace').options;
+  const result = checkStrict('a.ts', 'export const x = 1;\n', opts);
+  assert.ok(result.ok, result.diagnostics.join('\n'));
+});
+
 test('attaches JSDoc to an exported function expression (module.exports = fn)', () => {
   const source = `
 /**

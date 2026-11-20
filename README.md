@@ -357,7 +357,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 309 项测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、默认值/位运算/比较/in、for-of/解构/await/分支、幂运算/注解目标/展开/短路赋值、迭代回调元素深层形状、typeof function 合法化、catch 变量注解规避、弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、调用点空数组实参 widening、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数、公共 API 导出边界、调用/构造器展开的元组推断、d.ts 变量契约身份匹配、以及完整文件级端到端回归[strict/幂等/确定性/多文件]）
+npm test            # 310 项测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、默认值/位运算/比较/in、for-of/解构/await/分支、幂运算/注解目标/展开/短路赋值、迭代回调元素深层形状、typeof function 合法化、catch 变量注解规避、弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、调用点空数组实参 widening、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数、公共 API 导出边界、调用/构造器展开的元组推断、d.ts 变量契约身份匹配、以及完整文件级端到端回归[strict/幂等/确定性/多文件]）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check
