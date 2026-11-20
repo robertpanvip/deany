@@ -5,8 +5,8 @@ import { controlFlowNarrowedType } from './controlFlow.js';
 import { addConstraint, addSource, addWeakSource, emptyEvidence } from './state.js';
 import { declaredTypeOf, isExportedParameter } from './publicApi.js';
 import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, REDUCER_METHODS, REDUCER_SIGNATURE, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES, functionNameSuggestsReturnType, nameSuggestsNumber, variableNameSuggestsType } from './constants.js';
-import { arrayElementTypeOf, functionLikeName, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
-import { customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsOf } from './shape.js';
+import { arrayElementTypeOf, functionLikeName, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, iterableArgumentConstraint, iterableConstructorConstraint, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
+import { callResultShape, customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsWithCallsOf, renderShapeNode } from './shape.js';
 import { arithmeticNumberType, instanceTypeOf, orderableOperandType, symbolTypeText, typePredicateOfArgument, typeText } from './typeText.js';
 import { collectMutationEvidence, containerInstantiationFromMutations } from './mutation.js';
 import { callsOf, referencesOf } from './collect.js';
@@ -285,6 +285,29 @@ export function constraintsFromReference(
     addSource(evidence, typeText(ctx, parent.right));
   }
 
+  // Owner on the RIGHT of `=`: the value flows INTO the left-hand target, so
+  // a concrete target type is a covariant source for the owner. This is the
+  // setter/receiver case: `set x(p){ this._v = p }` where `_v` is already known
+  // to be `number` proves p can hold a number. Only concrete target types count
+  // — an evolving `any` (e.g. `this._v = 1` in the constructor) yields nothing.
+  // (Review round 17.)
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.right === useNode &&
+    parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+    // Destructuring targets (`({a} = v)` / `[a] = v`) are handled separately
+    // above: there the RHS is the source being destructured, not a value being
+    // assigned into a concrete slot. Typing the literal target would inject a
+    // spurious `{ a: any }` source. (Review round 17.)
+    !ts.isObjectLiteralExpression(parent.left) &&
+    !ts.isArrayLiteralExpression(parent.left)
+  ) {
+    const targetType = typeText(ctx, parent.left);
+    if (targetType !== undefined && !VAGUE_RETURN_TYPES.has(targetType)) {
+      addSource(evidence, targetType);
+    }
+  }
+
   // Logical assignment (`x ||= v`, `x &&= v`, `x ??= v`): v is a value the
   // binding receives, so it is a covariant source, just like `x = v`.
   if (
@@ -359,9 +382,21 @@ export function constraintsFromReference(
           ts.isCallExpression(grandparent) &&
           REDUCER_METHODS.has(parent.name.text) &&
           grandparent.arguments.length >= 2;
+        // `v.foo().bar()`: foo's return value is dereferenced/called further
+        // down the chain. That is real structural evidence about foo's return
+        // shape, not a name guess. Render it as a callable returning that
+        // shape so the whole chain type-checks (otherwise foo(): unknown and
+        // `.bar()` is TS2571). Reducers with an init keep their generic
+        // signature — their return is the accumulator, not a chained shape.
+        // (Review round 17.)
+        const chainedReturn = isMethodCall ? callResultShape(grandparent as ts.CallExpression) : undefined;
+        const methodSignature =
+          chainedReturn !== undefined
+            ? `(...args: unknown[]) => ${renderShapeNode(chainedReturn)}`
+            : METHOD_TYPE;
         evidence.properties.set(
           parent.name.text,
-          reducerWithInit ? REDUCER_SIGNATURE : METHOD_TYPE,
+          reducerWithInit ? REDUCER_SIGNATURE : methodSignature,
         );
         // Record the contextual (expected) return type of the call, so the
         // lib-unique narrowing can verify the method's signature matches the
@@ -369,6 +404,21 @@ export function constraintsFromReference(
         // and variable declarations, but nothing for bare/chained calls — those
         // stay unconstrained and still allow the weak narrowing.
         if (isMethodCall) {
+          // Record the first argument's observed type. A shared method called
+          // with a concrete type its would-be builtin family rejects (e.g.
+          // `includes(3)` on a would-be string) disproves that family later in
+          // uniqueBuiltinReceiverType. (Review round 17.)
+          const firstArg = (grandparent as ts.CallExpression).arguments[0];
+          if (firstArg !== undefined) {
+            const argType = typeText(ctx, firstArg);
+            if (argType !== undefined && !VAGUE_RETURN_TYPES.has(argType)) {
+              const list = evidence.methodArgumentTypes.get(parent.name.text) ?? [];
+              if (!list.includes(argType)) {
+                list.push(argType);
+              }
+              evidence.methodArgumentTypes.set(parent.name.text, list);
+            }
+          }
           const contextual = ctx.checker.getContextualType(grandparent as ts.CallExpression);
           if (contextual !== undefined) {
             const text = ctx.checker.typeToString(contextual);
@@ -455,8 +505,15 @@ export function constraintsFromReference(
       // empty set and erase the evidence.
       const objectArgs = objectArgumentIndices(parent);
       const isObjectSlot = objectArgs !== undefined && objectArgs.includes(index);
+      // `Promise.all(v)` / `Promise.race(v)`: the argument must be iterable.
+      // The checker resolves these overloads to `unknown` for an opaque arg,
+      // which is filtered, so record the real protocol requirement directly.
+      // (Review round 17.)
+      const iterableConstraint = index === 0 ? iterableArgumentConstraint(parent, ctx) : undefined;
       if (isObjectSlot) {
         addConstraint(evidence, 'object');
+      } else if (iterableConstraint !== undefined) {
+        addConstraint(evidence, iterableConstraint);
       } else {
         const signature = ctx.checker.getResolvedSignature(parent);
         const parameter = signature?.getParameters()[index];
@@ -485,6 +542,32 @@ export function constraintsFromReference(
           const inferred =
             parameterDecl === undefined ? undefined : ctx.table.declarations.get(parameterDecl);
           addConstraint(evidence, inferred ?? paramText ?? 'unknown');
+        }
+      }
+    }
+  }
+
+  // `new Map(v)` / `new Set(v)` / WeakMap / WeakSet: the first constructor
+  // argument must be iterable. Unlike CallExpression, NewExpression arguments
+  // were not previously visited here, so the binding stayed `unknown` and
+  // strict emitted TS2769. Record the real protocol requirement (Map/WeakMap
+  // need key/value entry pairs) as a contravariant constraint. (Review r17.)
+  if (ts.isNewExpression(parent)) {
+    const index = parent.arguments?.indexOf(useNode) ?? -1;
+    if (index >= 0) {
+      const ctorConstraint = index === 0 ? iterableConstructorConstraint(parent.expression, ctx) : undefined;
+      if (ctorConstraint !== undefined) {
+        addConstraint(evidence, ctorConstraint);
+      } else {
+        // General constructor parameters: `new Date(v)` requires
+        // `string | number | Date`, `new RegExp(v)` requires string, etc.
+        // The checker resolves the construct signature's parameter type;
+        // a user class with an implicit-any constructor yields `any` (filtered,
+        // stays unknown) so no concrete type is invented. (Review r17.)
+        const signature = ctx.checker.getResolvedSignature(parent);
+        const parameter = signature?.getParameters()[index];
+        if (parameter !== undefined) {
+          addConstraint(evidence, symbolTypeText(ctx, parameter, parent));
         }
       }
     }
@@ -556,8 +639,8 @@ export function constraintsFromReference(
         ts.isIdentifier(elementParam.name) &&
         callback.body !== undefined
       ) {
-        for (const chain of propertyChainsOf(elementParam.name, callback.body, ctx)) {
-          insertShapeChain(evidence.elementShape, chain);
+        for (const { keys, callable } of propertyChainsWithCallsOf(elementParam.name, callback.body, ctx)) {
+          insertShapeChain(evidence.elementShape, keys, callable);
         }
       }
     }
@@ -747,6 +830,20 @@ export function constraintsFromReference(
     }
   }
 
+  // `yield* x` delegates to an iterator, so x must be ITERABLE (exactly the
+  // same protocol requirement as `for...of`). Without this x stays `unknown`
+  // and strict emits TS2488 ("must have a [Symbol.iterator]() method"). The
+  // delegated element type is generally unknowable, so use the conservative
+  // `Iterable<unknown>` — accepting every value the original JS accepted.
+  // (Review round 17.)
+  if (
+    ts.isYieldExpression(parent) &&
+    parent.asteriskToken !== undefined &&
+    parent.expression === useNode
+  ) {
+    addConstraint(evidence, 'Iterable<unknown>');
+  }
+
   // `for (const v of x)` -> x must be ITERABLE, not necessarily an array.
   // Emitting `T[]` used to reject originally-legal `for...of` inputs (Set,
   // Generator, string). The loop body only proves the iteration *protocol* and,
@@ -799,8 +896,8 @@ export function constraintsFromReference(
         // (Line-by-line review bugs B2/B3.)
         if (elementType === 'unknown') {
           if (ts.isIdentifier(binding.name)) {
-            for (const chain of propertyChainsOf(binding.name, parent.statement, ctx)) {
-              insertShapeChain(evidence.elementShape, chain);
+            for (const { keys, callable } of propertyChainsWithCallsOf(binding.name, parent.statement, ctx)) {
+              insertShapeChain(evidence.elementShape, keys, callable);
             }
           } else if (ts.isObjectBindingPattern(binding.name)) {
             for (const element of binding.name.elements) {
@@ -815,8 +912,8 @@ export function constraintsFromReference(
               const key = keyNode.text;
               insertShapeChain(evidence.elementShape, [key]);
               if (ts.isIdentifier(element.name)) {
-                for (const chain of propertyChainsOf(element.name, parent.statement, ctx)) {
-                  insertShapeChain(evidence.elementShape, [key, ...chain]);
+                for (const { keys, callable } of propertyChainsWithCallsOf(element.name, parent.statement, ctx)) {
+                  insertShapeChain(evidence.elementShape, [key, ...keys], callable);
                 }
               }
             }

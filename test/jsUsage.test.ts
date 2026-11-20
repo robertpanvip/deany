@@ -441,3 +441,109 @@ test('R16-5: class expressions no longer emit illegal typeof texts', () => {
   const decl = convertJsStrict(`class Named { m(){ return 1; } }\n`);
   assert.ok(decl.strict.ok, decl.strict.diagnostics.join('\n'));
 });
+
+// --- Round 17: more strong-evidence sites + chained call-result shapes ------
+
+test('R17-1: yield* operand gets an Iterable protocol constraint', () => {
+  const out = convertJsStrict(`function* probe(v){ yield* v; }\n`);
+  assert.match(out.output, /probe\(v: Iterable<unknown>\)/);
+  assert.ok(out.strict.ok, out.strict.diagnostics.join('\n'));
+});
+
+test('R17-2: iterable constructor / static-method argument slots', () => {
+  const map = convertJsStrict(`function probe(v){ return new Map(v); }\n`);
+  assert.match(map.output, /probe\(v: Iterable<readonly \[unknown, unknown\]>\)/);
+  assert.ok(map.strict.ok, map.strict.diagnostics.join('\n'));
+
+  const set = convertJsStrict(`function probe(v){ return new Set(v); }\n`);
+  assert.match(set.output, /probe\(v: Iterable<unknown>\)/);
+  assert.ok(set.strict.ok, set.strict.diagnostics.join('\n'));
+
+  const all = convertJsStrict(`function probe(v){ return Promise.all(v); }\n`);
+  assert.match(all.output, /probe\(v: Iterable<unknown>\)/);
+  assert.ok(all.strict.ok, all.strict.diagnostics.join('\n'));
+
+  const race = convertJsStrict(`function probe(v){ return Promise.race(v); }\n`);
+  assert.match(race.output, /probe\(v: Iterable<unknown>\)/);
+  assert.ok(race.strict.ok, race.strict.diagnostics.join('\n'));
+});
+
+test('R17-3: general constructor parameters use the resolved construct signature', () => {
+  const date = convertJsStrict(`function probe(v){ return new Date(v); }\n`);
+  assert.match(date.output, /probe\(v: Date \| number \| string\)/);
+  assert.ok(date.strict.ok, date.strict.diagnostics.join('\n'));
+
+  const err = convertJsStrict(`function probe(v){ return new Error(v); }\n`);
+  assert.match(err.output, /probe\(v: string \| undefined\)/);
+  assert.ok(err.strict.ok, err.strict.diagnostics.join('\n'));
+
+  // A shadowed global constructor is never narrowed to the lib signature.
+  const shadowed = convertJsStrict(`function probe(v, Map){ return new Map(v); }\n`);
+  assert.match(shadowed.output, /probe\(v: unknown, Map:/);
+  assert.ok(shadowed.strict.ok, shadowed.strict.diagnostics.join('\n'));
+});
+
+test('R17-4: setter parameters reverse-propagate from a concrete target type', () => {
+  const num = convertJsStrict(`class C { constructor(){this._v=1;} set x(p){this._v=p;} }\n`);
+  assert.match(num.output, /set x\(p: number\)/);
+  assert.ok(num.strict.ok, num.strict.diagnostics.join('\n'));
+
+  const str = convertJsStrict(`class C { constructor(){this._s='x';} set x(p){this._s=p;} }\n`);
+  assert.match(str.output, /set x\(p: string\)/);
+  assert.ok(str.strict.ok, str.strict.diagnostics.join('\n'));
+
+  // Destructuring assignment targets are NOT treated as concrete slots (R16-4).
+  const destr = convertJsStrict(`function probe(v) { let a; ({a} = v); return a; }\n`);
+  assert.match(destr.output, /probe\(v: \{ a: unknown; \}\)/);
+  assert.ok(destr.strict.ok, destr.strict.diagnostics.join('\n'));
+});
+
+test('R17-5: iteration-element methods are callable, not unknown', () => {
+  const forOf = convertJsStrict(`function probe(v){ for (const x of v) { x.toUpperCase(); } }\n`);
+  assert.match(forOf.output, /Iterable<\{ toUpperCase: \(\.\.\.args: unknown\[\]\) => unknown; \}>/);
+  assert.ok(forOf.strict.ok, forOf.strict.diagnostics.join('\n'));
+
+  const cb = convertJsStrict(`function probe(v){ return v.map(x => x.toUpperCase()); }\n`);
+  assert.match(cb.output, /Array<\{ toUpperCase: \(\.\.\.args: unknown\[\]\) => unknown; \}>/);
+  assert.ok(cb.strict.ok, cb.strict.diagnostics.join('\n'));
+});
+
+test('R17-6: includes/indexOf with a non-string argument is not narrowed to string', () => {
+  const inc = convertJsStrict(`function probe(v){ return v.includes(3); }\n`);
+  assert.match(inc.output, /probe\(v: \{ includes: \(\.\.\.args: unknown\[\]\) => unknown; \}\)/);
+  assert.doesNotMatch(inc.output, /probe\(v: string\)/);
+  assert.ok(inc.strict.ok, inc.strict.diagnostics.join('\n'));
+
+  const idx = convertJsStrict(`function probe(v){ return v.indexOf(3); }\n`);
+  assert.doesNotMatch(idx.output, /probe\(v: string\)/);
+  assert.ok(idx.strict.ok, idx.strict.diagnostics.join('\n'));
+
+  // A genuine string argument still narrows to string (no regression).
+  const str = convertJsStrict(`function probe(v){ return v.includes('x'); }\n`);
+  assert.match(str.output, /probe\(v: string\)/);
+  assert.ok(str.strict.ok, str.strict.diagnostics.join('\n'));
+
+  const upper = convertJsStrict(`function probe(v){ return v.toUpperCase(); }\n`);
+  assert.match(upper.output, /probe\(v: string\)/);
+  assert.ok(upper.strict.ok, upper.strict.diagnostics.join('\n'));
+});
+
+test('R17-7: chained call results carry the downstream method shape (v.foo().bar())', () => {
+  const one = convertJsStrict(`function probe(v){ return v.foo().bar(); }\n`);
+  assert.match(one.output, /foo: \(\.\.\.args: unknown\[\]\) => \{ bar: \(\.\.\.args: unknown\[\]\) => unknown; \}/);
+  assert.ok(one.strict.ok, one.strict.diagnostics.join('\n'));
+
+  const deep = convertJsStrict(`function probe(v){ return v.foo().bar().baz(); }\n`);
+  assert.match(deep.output, /bar: \(\.\.\.args: unknown\[\]\) => \{ baz: \(\.\.\.args: unknown\[\]\) => unknown; \}/);
+  assert.ok(deep.strict.ok, deep.strict.diagnostics.join('\n'));
+
+  // A non-call downstream property is a plain value, not a method.
+  const prop = convertJsStrict(`function probe(v){ return v.foo().prop; }\n`);
+  assert.match(prop.output, /foo: \(\.\.\.args: unknown\[\]\) => \{ prop: unknown; \}/);
+  assert.ok(prop.strict.ok, prop.strict.diagnostics.join('\n'));
+
+  // A plain single call keeps the weak callable signature (no regression).
+  const plain = convertJsStrict(`function probe(v){ return v.foo(); }\n`);
+  assert.match(plain.output, /probe\(v: \{ foo: \(\.\.\.args: unknown\[\]\) => unknown; \}\)/);
+  assert.ok(plain.strict.ok, plain.strict.diagnostics.join('\n'));
+});

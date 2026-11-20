@@ -2,7 +2,7 @@ import * as ts from 'typescript';
 import { hasTopLevelArrow } from '../normalize.js';
 
 import type { FunctionLikeWithBody, InferenceContext } from './types.js';
-import { OBJECT_ARGUMENT_APIS, TYPE_FORMAT } from './constants.js';
+import { ITERABLE_ARGUMENT_CONSTRAINT, ITERABLE_CONSTRUCTOR_CONSTRAINT, OBJECT_ARGUMENT_APIS, TYPE_FORMAT } from './constants.js';
 
 export function isFunctionLike(node: ts.Node): node is FunctionLikeWithBody {
   return (
@@ -447,6 +447,67 @@ export function objectArgumentIndices(call: ts.CallExpression): readonly number[
     return undefined;
   }
   return OBJECT_ARGUMENT_APIS[`${receiver}.${callee.name.text}`];
+}
+
+/**
+ * Iterable-argument constraint for `Promise.all(v)` / `Promise.race(v)`:
+ * a static method with a real global receiver. Returns the constraint text or
+ * undefined. The receiver must resolve to a declaration-file symbol so a
+ * user-shadowed `Promise` is never mistaken for the global. (Review r17.)
+ */
+export function iterableArgumentConstraint(
+  call: ts.CallExpression,
+  ctx: InferenceContext,
+): string | undefined {
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee)) {
+    return undefined;
+  }
+  const receiver = callee.expression;
+  if (!ts.isIdentifier(receiver) || receiver.text !== 'Promise') {
+    return undefined;
+  }
+  const constraint = ITERABLE_ARGUMENT_CONSTRAINT[`Promise.${callee.name.text}`];
+  if (constraint === undefined) {
+    return undefined;
+  }
+  // Only the genuine global Promise qualifies — all its declarations live in
+  // a lib file. A locally defined/shadowed Promise keeps its own signature.
+  const declarations = ctx.checker.getSymbolAtLocation(receiver)?.declarations;
+  if (declarations === undefined || declarations.length === 0) {
+    return undefined;
+  }
+  if (!declarations.every((d) => d.getSourceFile().isDeclarationFile)) {
+    return undefined;
+  }
+  return constraint;
+}
+
+/**
+ * Iterable-constructor constraint for `new Map(v)` / `new Set(v)` / WeakMap /
+ * WeakSet. The constructor identifier must be an unshadowed global (all its
+ * declarations in a lib file), so a local `Map` class is never narrowed.
+ * (Review round 17.)
+ */
+export function iterableConstructorConstraint(
+  expr: ts.Expression,
+  ctx: InferenceContext,
+): string | undefined {
+  if (!ts.isIdentifier(expr)) {
+    return undefined;
+  }
+  const constraint = ITERABLE_CONSTRUCTOR_CONSTRAINT[expr.text];
+  if (constraint === undefined) {
+    return undefined;
+  }
+  const declarations = ctx.checker.getSymbolAtLocation(expr)?.declarations;
+  if (declarations === undefined || declarations.length === 0) {
+    return undefined;
+  }
+  if (!declarations.every((d) => d.getSourceFile().isDeclarationFile)) {
+    return undefined;
+  }
+  return constraint;
 }
 
 /**

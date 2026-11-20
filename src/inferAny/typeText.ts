@@ -1,7 +1,7 @@
 import * as ts from 'typescript';
 
 import type { InferenceContext } from './types.js';
-import { ARRAY_SCALAR_RETURN, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, TYPE_FORMAT, UNIQUE_BUILTIN_METHODS, VAGUE_RETURN_TYPES } from './constants.js';
+import { ARRAY_SCALAR_RETURN, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, STRING_ARRAY_SHARED_METHODS, TYPE_FORMAT, UNIQUE_BUILTIN_METHODS, VAGUE_RETURN_TYPES } from './constants.js';
 import { isArrayTypeString, sanitizeInstanceType, splitTypeArguments, widenedTypeText } from './util.js';
 
 /** Table lookup for a node whose checker type is `any`. This is the positive
@@ -201,6 +201,7 @@ export function symbolTypeText(
 export function uniqueBuiltinReceiverType(
   properties: ReadonlyMap<string, string>,
   methodReturnTypes: ReadonlyMap<string, readonly string[]>,
+  methodArgumentTypes?: ReadonlyMap<string, readonly string[]>,
 ): string | undefined {
   if (properties.size === 0) {
     return undefined;
@@ -210,8 +211,22 @@ export function uniqueBuiltinReceiverType(
   if (!keys.every((key) => properties.get(key) === METHOD_TYPE)) {
     return undefined;
   }
+  // A shared string/array method called with a concrete non-string argument
+  // disproves the string family: `v.includes(3)` cannot be string.includes
+  // (which requires a string), so v is more likely an array. Reject narrowing
+  // to `string` in that case; the property shape (`{ includes: fn }`) remains
+  // as honest evidence. (Review round 17.)
+  const rejectsStringFamily =
+    methodArgumentTypes !== undefined &&
+    keys.some((key) =>
+      STRING_ARRAY_SHARED_METHODS.has(key) &&
+      (methodArgumentTypes.get(key) ?? []).some((arg) => arg !== 'string'),
+    );
   for (const family of UNIQUE_BUILTIN_METHODS) {
     if (!keys.every((key) => family.methods.has(key))) {
+      continue;
+    }
+    if (rejectsStringFamily && family.type === 'string') {
       continue;
     }
     // Signature check: every contextual return type observed at a call site

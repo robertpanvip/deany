@@ -6,7 +6,11 @@ import { INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES } from '
 import { addStringIndexSignature, isArrayTypeString, splitTopLevelUnion } from './util.js';
 import { uniqueBuiltinReceiverType } from './typeText.js';
 
-export function insertShapeChain(root: ShapeNode, chain: readonly string[]): void {
+export function insertShapeChain(
+  root: ShapeNode,
+  chain: readonly string[],
+  callable = false,
+): void {
   let node = root;
   for (const key of chain) {
     let child = node.children.get(key);
@@ -16,19 +20,24 @@ export function insertShapeChain(root: ShapeNode, chain: readonly string[]): voi
     }
     node = child;
   }
+  // A chain observed as a call (`x.foo()`) marks its terminal node callable.
+  // A later read of the same key must never downgrade it back to a plain value.
+  if (callable) {
+    node.callable = true;
+  }
 }
 
 export function renderShapeNode(node: ShapeNode): string {
-  if (node.children.size === 0) {
-    return 'unknown';
-  }
   const fields = [...node.children.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, child]) => {
       const name = /^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key);
       return `${name}: ${renderShapeNode(child)};`;
     });
-  return `{ ${fields.join(' ')} }`;
+  const value = fields.length === 0 ? 'unknown' : `{ ${fields.join(' ')} }`;
+  // A callable node is a method. Its own children describe the shape returned
+  // by the call (e.g. `v.foo().bar()` -> foo(): { bar: (...args)=>unknown }).
+  return node.callable === true ? `(...args: unknown[]) => ${value}` : value;
 }
 
 /** Render accessed properties as an inline object type, e.g. `{ a: number; }`. */
@@ -161,14 +170,41 @@ export function propertyChainsOf(
   body: ts.Node,
   ctx: InferenceContext,
 ): string[][] {
+  return propertyChainsWithCallsOf(root, body, ctx).map(({ keys }) => [...keys]);
+}
+
+/**
+ * Like `propertyChainsOf`, but also reports whether the chain's terminal node
+ * was observed being *called* (`x.foo()`). Used to render iteration elements
+ * and callback params with callable method signatures instead of `unknown`,
+ * which strict mode would reject with TS18046. Two passes (called-expression
+ * set, then chain walk) avoid relying on `node.parent` before binding.
+ * (Review round 17.)
+ */
+export function propertyChainsWithCallsOf(
+  root: ts.Identifier,
+  body: ts.Node,
+  ctx: InferenceContext,
+): { keys: string[]; callable: boolean }[] {
   const rootSymbol = ctx.checker.getSymbolAtLocation(root);
-  const chains: string[][] = [];
+  const called = new Set<ts.Node>();
+  const markCalls = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) {
+      called.add(node.expression);
+    }
+    ts.forEachChild(node, markCalls);
+  };
+  markCalls(body);
+
+  const chains: { keys: string[]; callable: boolean }[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isPropertyAccessExpression(node)) {
       const chain: string[] = [];
       let current: ts.Expression = node;
+      let terminal: ts.Expression = node;
       while (ts.isPropertyAccessExpression(current)) {
         chain.unshift(current.name.text);
+        terminal = current;
         current = current.expression;
       }
       if (ts.isIdentifier(current)) {
@@ -176,7 +212,7 @@ export function propertyChainsOf(
         const same = symbol !== undefined && symbol === rootSymbol;
         const sameText = symbol === undefined && rootSymbol === undefined && current.text === root.text;
         if ((same || sameText) && chain.length > 0) {
-          chains.push(chain);
+          chains.push({ keys: chain, callable: called.has(terminal) });
         }
       }
     }
@@ -184,6 +220,61 @@ export function propertyChainsOf(
   };
   visit(body);
   return chains;
+}
+
+/**
+ * Describe how the result of a call is used further downstream, as a shape
+ * node. For `v.foo().bar()` the call `v.foo()` has a single consumer — the
+ * property access `.bar` that is itself called — so the result shape is
+ * `{ bar: (...args: unknown[]) => unknown }`. Structural usage evidence only:
+ * the code genuinely dereferences and calls those properties on the result.
+ * Returns undefined when the call result has no such chained dereference.
+ * (Review round 17.)
+ */
+export function callResultShape(call: ts.CallExpression): ShapeNode | undefined {
+  return shapeAfterValue(call);
+}
+
+/**
+ * Build the shape of whatever is dereferenced on `value`, recursing through
+ * arbitrary call/property chains. `value.key()` yields a callable `key` whose
+ * return shape is whatever follows; `value.key` yields a plain `key` whose own
+ * sub-shape continues. Anchored by AST identity (`parent.expression === value`),
+ * not by name, so shadowed locals cannot pollute the chain.
+ */
+function shapeAfterValue(value: ts.Expression): ShapeNode | undefined {
+  const parent: ts.Node | undefined = value.parent;
+  if (parent === undefined || !ts.isPropertyAccessExpression(parent) || parent.expression !== value) {
+    return undefined;
+  }
+  const key = parent.name.text;
+  const node: ShapeNode = { children: new Map<string, ShapeNode>() };
+  const grandparent: ts.Node | undefined = parent.parent;
+  if (grandparent !== undefined && ts.isCallExpression(grandparent) && grandparent.expression === parent) {
+    // `value.key()` — key is callable; its return shape is whatever follows.
+    node.callable = true;
+    const deeper = shapeAfterValue(grandparent);
+    if (deeper !== undefined) {
+      for (const [k, v] of deeper.children) {
+        node.children.set(k, v);
+      }
+    }
+  } else if (
+    grandparent !== undefined &&
+    ts.isPropertyAccessExpression(grandparent) &&
+    grandparent.expression === parent
+  ) {
+    // `value.key.sub` — key is a plain property with a continuing sub-shape.
+    const deeper = shapeAfterValue(parent);
+    if (deeper !== undefined) {
+      for (const [k, v] of deeper.children) {
+        node.children.set(k, v);
+      }
+    }
+  }
+  const root: ShapeNode = { children: new Map<string, ShapeNode>() };
+  root.children.set(key, node);
+  return root;
 }
 
 /** Set intersection of top-level union members across several constraints. */
@@ -378,7 +469,7 @@ export function mergeEvidence(evidence: Evidence): {
     members = [renderShapeNode(evidence.shapeChain)];
     weak = true;
   } else if (
-    uniqueBuiltinReceiverType(evidence.properties, evidence.methodReturnTypes) !== undefined
+    uniqueBuiltinReceiverType(evidence.properties, evidence.methodReturnTypes, evidence.methodArgumentTypes) !== undefined
   ) {
     // Last resort: the binding was only observed calling methods unique to a
     // builtin family (e.g. `s.toUpperCase()`), so narrow to that primitive.
@@ -386,7 +477,7 @@ export function mergeEvidence(evidence: Evidence): {
     // same-named methods on a custom shape are never narrowed, and guarded so
     // a return context contradicting the builtin signature rejects it.
     members = [
-      uniqueBuiltinReceiverType(evidence.properties, evidence.methodReturnTypes) as string,
+      uniqueBuiltinReceiverType(evidence.properties, evidence.methodReturnTypes, evidence.methodArgumentTypes) as string,
     ];
     weak = true;
   } else if (evidence.properties.size > 0) {

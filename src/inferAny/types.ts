@@ -116,6 +116,15 @@ export type CallSite = ts.CallExpression | ts.NewExpression;
  */
 export interface ShapeNode {
   readonly children: Map<string, ShapeNode>;
+  /**
+   * True when this node was observed being *called* (e.g. `x.foo()` or a
+   * for-of element's `x.toUpperCase()`). Rendered as a callable signature so
+   * strict mode accepts the call instead of TS18046 ("not callable"). A
+   * callable node can still have children, representing the shape of the
+   * value returned by the call (e.g. `v.foo().bar()` -> foo returns an object
+   * with a callable `bar`). (Review round 17.)
+   */
+  callable?: boolean;
 }
 
 /**
@@ -156,6 +165,13 @@ export interface Evidence {
    * not the builtin one.
    */
   readonly methodReturnTypes: Map<string, string[]>;
+  /**
+   * Observed argument types at call sites of methods (first argument text).
+   * Used to reject a builtin-family narrowing when an argument contradicts
+   * the family's signature — e.g. `v.includes(3)` proves v is not a string
+   * (string.includes takes a string; arrays also have includes). (Review r17.)
+   */
+  readonly methodArgumentTypes: Map<string, string[]>;
   objectLiteralInit: boolean;
   /** True when the binding was seen only in string-like contexts. Weak hint. */
   stringContext: boolean;

@@ -338,3 +338,35 @@ export const OBJECT_ARGUMENT_APIS: Readonly<Record<string, readonly number[]>> =
   'Reflect.set': [0],
   'Reflect.setPrototypeOf': [0],
 }
+
+/**
+ * APIs whose first argument must be ITERABLE, keyed by `<receiver>.<method>`.
+ * lib.d.ts resolves these overloads to `unknown` / `any` for an opaque argument,
+ * which gets filtered, leaving the binding `unknown` and strict rejecting the
+ * call (TS2769). Record the real protocol requirement as a contravariant
+ * constraint. Map's entries must be key/value pairs; Set / Promise.all/race
+ * accept any iterable. (Review round 17.)
+ */
+export const ITERABLE_ARGUMENT_CONSTRAINT: Readonly<Record<string, string>> = {
+  'Promise.all': 'Iterable<unknown>',
+  'Promise.race': 'Iterable<unknown>',
+}
+
+/** Constructors whose first argument must be iterable, keyed by class name. */
+export const ITERABLE_CONSTRUCTOR_CONSTRAINT: Readonly<Record<string, string>> = {
+  Map: 'Iterable<readonly [unknown, unknown]>',
+  WeakMap: 'Iterable<readonly [object, unknown]>',
+  Set: 'Iterable<unknown>',
+  WeakSet: 'Iterable<object>',
+}
+
+/**
+ * Methods shared by `string` and `Array` whose first argument has a different
+ * type in each: string's version takes a `string`, the array version takes an
+ * element of any type. Observing a concrete non-string argument therefore
+ * disproves the `string` family (e.g. `v.includes(3)` — a string can't include
+ * a number). Used to reject a false builtin narrowing. (Review round 17.)
+ */
+export const STRING_ARRAY_SHARED_METHODS: ReadonlySet<string> = new Set([
+  'includes', 'indexOf', 'lastIndexOf',
+])

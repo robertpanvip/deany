@@ -49,6 +49,7 @@ export function emptyEvidence(): Evidence {
     shapeChain: { children: new Map<string, ShapeNode>() },
     arrayOwnMethods: new Map<string, string>(),
     methodReturnTypes: new Map<string, string[]>(),
+    methodArgumentTypes: new Map<string, string[]>(),
     objectLiteralInit: false,
     stringContext: false,
     ambiguousAdd: false,
