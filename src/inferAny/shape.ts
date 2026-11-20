@@ -427,6 +427,14 @@ export function mergeEvidence(evidence: Evidence): {
     return {
       reason: `only internal call-site evidence (${[...new Set(evidence.weakSources)].join(', ')}); public parameter left un-narrowed`,
     };
+  } else if (evidence.returnsAddExpression) {
+    // An expression-bodied arrow (`(a, b) => a + b`) has no return statement:
+    // its body IS the returned `+` expression, yet contributes no source, so it
+    // reaches here with no evidence. JS `+` is addition or concatenation, so the
+    // honest fallback return is `string | number` (same as the block-bodied
+    // path). Marked weak so a later round's real evidence still overrides it.
+    // (Review round 13.)
+    return { type: 'string | number', weak: true };
   } else {
     return { reason: 'no usage evidence' };
   }
@@ -445,6 +453,17 @@ export function mergeEvidence(evidence: Evidence): {
   // `unknown[]`, `Array<unknown>`, `{ k: unknown }`, `=> unknown` etc. are
   // distinct members and are never absorbed.
   if (members.includes('unknown')) {
+    // A function returning a `+` expression whose operands were untyped has no
+    // concrete return evidence — the bare `unknown` is the fallback for that
+    // opaque `+`. JS `+` is either numeric addition or string concatenation, so
+    // `string | number` is the honest, strictly-more-informative type (and is
+    // safely assignable from any `+` result). Only when EVERY member is a bare
+    // `unknown` (no concrete sibling) and the body actually returns `+`; a real
+    // return type is never downgraded. Marked weak so real evidence still wins.
+    // (Review round 13.)
+    if (evidence.returnsAddExpression && members.every((m) => m === 'unknown')) {
+      return { type: 'string | number', weak: true };
+    }
     return { type: 'unknown', weak };
   }
   if (members.length === 1) {

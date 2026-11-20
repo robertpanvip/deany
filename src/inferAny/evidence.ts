@@ -1040,6 +1040,18 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0
       }
       if (ts.isReturnStatement(node) && node.expression !== undefined) {
         hasValueReturn = true;
+        // JS `+` yields number (addition) or string (concatenation). When its
+        // operands carry no concrete type the expression is opaque and the
+        // fallback below emits `unknown`. Record that the returned expression
+        // is a `+` so the merge stage can narrow that bare-`unknown` fallback
+        // to the honest `string | number`. Purely syntactic (no dependency on
+        // fixed-point type state). (Review round 13.)
+        if (
+          ts.isBinaryExpression(node.expression) &&
+          node.expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+        ) {
+          evidence.returnsAddExpression = true;
+        }
         const returned =
           typeText(ctx, node.expression) ?? arithmeticNumberType(ctx, node.expression);
         // An opaque returned expression (e.g. `return x[0]` / `return x.length`
@@ -1067,6 +1079,22 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0
       // Without this the inferred `T` is too narrow and strict mode emits
       // TS2366. Add `undefined` so the honest union `T | undefined` is emitted.
       addSource(evidence, 'undefined');
+    }
+  } else if (isFunctionLike(owner) && owner.body !== undefined && !ts.isBlock(owner.body)) {
+    // Expression-bodied arrow (`(a, b) => a + b`): the body expression is the
+    // implicit return value. If it is an anchor-less `+` (neither operand has a
+    // concrete number type), record it so the merge stage can fall back to
+    // `string | number` instead of an opaque `unknown`. The anchor check is
+    // essential: in `c => a + b + c` with a/b/c typed number (e.g. a nested
+    // JSDoc function type), the result is a concrete number and must NOT be
+    // widened — arithmeticNumberType returns 'number' there, so no mark.
+    // (Review round 13.)
+    if (
+      ts.isBinaryExpression(owner.body) &&
+      owner.body.operatorToken.kind === ts.SyntaxKind.PlusToken &&
+      arithmeticNumberType(ctx, owner.body) === undefined
+    ) {
+      evidence.returnsAddExpression = true;
     }
   }
 

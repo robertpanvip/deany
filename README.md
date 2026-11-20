@@ -7,7 +7,7 @@
 核心思路：用 TypeScript Compiler API 解析 JS，在原源码位置上插入类型注解（保留原有代码与注释），并把 JSDoc 的松散类型语法归一化为 TS 类型语法。所有没有类型来源的槽位默认补 `unknown`，避免隐式 `any` 掉进 scriptc 的 dynamic tier。
 
 > 两处刻意的弱证据例外（都**不会**覆盖真实证据）：
-> - **无锚点 `+`**：`function combine(a,b){ return a+b }` 里 `+` 可能是数字加法也可能是字符串拼接，无法确定；参数补 `any`（忠实还原原始隐式-any JS，使表达式在 strict 下合法，而非 `unknown` 导致 TS18046）。若函数名是数值语义词（`add`/`sum`/`count`/`total`/`max`/`min`…），参数改为弱 `number` 提示；真实调用点或 JSDoc 会立即覆盖它。
+> - **无锚点 `+`**：`function combine(a,b){ return a+b }` 里 `+` 可能是数字加法也可能是字符串拼接，无法确定；参数补 `any`（忠实还原原始隐式-any JS，使表达式在 strict 下合法，而非 `unknown` 导致 TS18046），返回补 `string | number`（`+` 的真实结果类型，严格优于 `unknown`）。箭头 `(a,b)=>a+b` 同理。若函数名是数值语义词（`add`/`sum`/`count`/`total`/`max`/`min`…），参数改为弱 `number` 提示；真实调用点或 JSDoc 会立即覆盖它。有 number 锚点的 `+`（如 `a+1`、或已知数值的嵌套表达式）返回 concrete `number`，不被放宽。
 > - **无调用点的 reduce**：`list.reduce((a,b)=>a+b, 0)` 的接收者得到泛型签名 `<T>(cb, init:T)=>T`，由 TS 从真实的 `init` 推断累加器类型——不臆测元素类型。无 `init` 时没有类型锚点，保持保守处理。
 
 ## 安装
@@ -361,7 +361,7 @@ for (const file of inferred) {
 
 ```bash
 npm run typecheck   # 项目自身严格检查
-npm test            # 314 项测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、默认值/位运算/比较/in、for-of/解构/await/分支、幂运算/注解目标/展开/短路赋值、迭代回调元素深层形状、typeof function 合法化、catch 变量注解规避、弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、调用点空数组实参 widening、无调用点 reduce 泛型归约签名、无锚点 + 的 any 保底与数值命名弱证据、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数、公共 API 导出边界、调用/构造器展开的元组推断、d.ts 变量契约身份匹配、以及完整文件级端到端回归[strict/幂等/确定性/多文件]）
+npm test            # 317 项测试（含 JS 隐式 any 反推、链式/跨文件传播、typeof/isArray/instanceof 收窄反推、内置 API 对象槽位反推、callee/new 可调用签名反推、索引/for-in 可索引对象反推、默认值/位运算/比较/in、for-of/解构/await/分支、幂运算/注解目标/展开/短路赋值、迭代回调元素深层形状、typeof function 合法化、catch 变量注解规避、弱证据二次精化、嵌套 any 槽位投影、容器变异联合推断、调用点空数组实参 widening、无调用点 reduce 泛型归约签名、无锚点 + 的 any 保底/string|number 返回与数值命名弱证据、方差感知的联合/交集推断、大写 JSDoc 类型归一化、回调参数、公共 API 导出边界、调用/构造器展开的元组推断、d.ts 变量契约身份匹配、以及完整文件级端到端回归[strict/幂等/确定性/多文件]）
 npm run demo        # JSDoc -> TS 端到端 + --check
 npm run infer-demo  # TS 显式 any 反推端到端 + --check
 npm run js-infer-demo # JS 隐式 any 反推端到端 + --check

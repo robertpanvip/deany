@@ -173,6 +173,16 @@ export interface Evidence {
    * source, constraint or property exists. (Review round 12 / idea 3.)
    */
   nameHintNumber: boolean;
+  /**
+   * True when a function body's returned expression is a `+` operation. JS
+   * `+` yields either a number (numeric addition) or a string (concatenation),
+   * so when no real return evidence exists the return falls back to
+   * `string | number` rather than `unknown` — a strictly more informative and
+   * still safe type. Only consumed in the bare-`unknown` fallback branch, so
+   * any real return evidence (JSDoc, call sites, anchors) always wins.
+   * (Review round 13.)
+   */
+  returnsAddExpression: boolean;
 }
 
 export type MutationKind = 'collection' | 'map' | 'set';

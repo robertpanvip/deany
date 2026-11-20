@@ -257,6 +257,53 @@ test('R12-4: weak name hint and any fallback never outrank real evidence', () =>
   assert.ok(checkStrict('a.ts', anyFallback).ok);
 });
 
+test('R13-1: anchor-less + return is string|number (block body and expression arrow)', () => {
+  // JS `+` is numeric addition OR string concatenation, so a return with no
+  // concrete operand type is honestly `string | number` — strictly more
+  // informative than `unknown`, and safely assignable from any + result.
+  const block = convertJsWithResolver('a.js',
+    'export function combine(a, b) { return a + b; }');
+  assert.match(block, /function combine\(a: any, b: any\): string \| number/);
+  assert.ok(checkStrict('a.ts', block).ok);
+
+  const arrow = convertJsWithResolver('a.js',
+    'export const combine = (a, b) => a + b;');
+  assert.match(arrow, /\(a: any, b: any\): string \| number => a \+ b/);
+  assert.ok(checkStrict('a.ts', arrow).ok);
+});
+
+test('R13-2: a concrete + result is NOT widened to string|number', () => {
+  // With a number anchor the + is provably numeric (a real return source), so
+  // the string|number fallback must not fire. Covers the nested-JSDoc curry
+  // case that regressed during development (inner c => a+b+c must stay number).
+  const anchored = convertJsWithResolver('a.js',
+    'export function inc(a) { return a + 1; }');
+  assert.match(anchored, /function inc\(a: number\): number/);
+  assert.ok(checkStrict('a.ts', anchored).ok);
+
+  const curry = convertJsWithResolver('a.js', [
+    '/** @returns {function(number): function(number): number} */',
+    'function make(a) { return b => c => a + b + c; }',
+    'const r = make(1)(2)(3);',
+  ].join('\n'));
+  assert.doesNotMatch(curry, /string \| number/);
+  assert.ok(checkStrict('a.ts', curry).ok);
+});
+
+test('R13-3: non-+ opaque returns and JSDoc @returns keep their type', () => {
+  const opaque = convertJsWithResolver('a.js',
+    'export function count(xs) { return xs.length; }');
+  assert.match(opaque, /\): unknown \{ return xs\.length; \}/);
+  assert.ok(checkStrict('a.ts', opaque).ok);
+
+  const jsdoc = convertJsWithResolver('a.js', [
+    '/** @returns {boolean} */',
+    'function combine(a, b) { return a + b; }',
+  ].join('\n'));
+  assert.match(jsdoc, /\): boolean \{ return a \+ b; \}/);
+  assert.ok(checkStrict('a.ts', jsdoc).ok);
+});
+
 test('R12-1: untyped reduce receiver gets a generic accumulator signature', () => {
   // With no call site or JSDoc, `list.reduce((a,b)=>a+b, 0)` used to freeze the
   // callback params at `unknown` (TS18046). The receiver now carries a generic
