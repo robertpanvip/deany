@@ -159,6 +159,15 @@ export function declaredTypeOf(
   }
 
   if (isClassMember(owner) && owner.name !== undefined && ts.isIdentifier(owner.name)) {
+    // A sibling .d.ts is the MODULE'S PUBLIC CONTRACT. A same-named class
+    // declared inside a function body (`function run(){ class Widget{ ... } }`)
+    // is not that export, so a `Class.member` name match alone must not apply
+    // its declared type. Gate on symbol-backed export status (same fix as the
+    // variable/function branches): the member belongs to the contract only
+    // when its owning class is itself an exported declaration. (Review P1.)
+    if (checker !== undefined && !isExportedDeclaration(owner, checker)) {
+      return undefined;
+    }
     const parent = owner.parent;
     if (ts.isClassDeclaration(parent) && parent.name !== undefined) {
       const value = provider.members.get(`${parent.name.text}.${owner.name.text}`);

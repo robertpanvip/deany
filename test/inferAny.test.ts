@@ -1719,3 +1719,77 @@ export const out = n;
   const strict = checkStrict('case.ts', output);
   assert.equal(strict.ok, true, strict.diagnostics.join('\n'));
 });
+
+// --- Review P1: rest tuple spread keeps tuple structure, .d.ts class-member identity ---
+test('P1: a tuple rest spread keeps its full tuple, not its first element as an array', () => {
+  // `f(...args)` where f declares `...xs: [number, string]`: the spread
+  // argument must be exactly that tuple. Collapsing to `number[]` (the old
+  // behaviour) loses every element after the first and fails the spread
+  // with TS2556. Arrays must still infer their element type.
+  const fixed = infer(`function f(...xs: [number, string]): void {}\nfunction invoke(args: any) { f(...args); }\n`);
+  assert.match(fixed.output, /function invoke\(args: \[number, string\]\)/);
+  assert.ok(checkStrict('case.ts', fixed.output).ok, checkStrict('case.ts', fixed.output).diagnostics.join('\n'));
+
+  const arrayRest = infer(`function f(...xs: number[]): void {}\nfunction invoke(args: any) { f(...args); }\n`);
+  assert.match(arrayRest.output, /function invoke\(args: number\[\]\)/); // guard: arrays unchanged
+  assert.ok(checkStrict('case.ts', arrayRest.output).ok, checkStrict('case.ts', arrayRest.output).diagnostics.join('\n'));
+});
+
+test('P1: optional and variadic tuple spreads keep their tuple markers', () => {
+  const optional = infer(`function f(...xs: [number, string?]): void {}\nfunction invoke(args: any) { f(...args); }\n`);
+  assert.match(optional.output, /function invoke\(args: \(?\[number, \(?string \| undefined\)\?\]\)?\)/);
+  assert.ok(checkStrict('case.ts', optional.output).ok, checkStrict('case.ts', optional.output).diagnostics.join('\n'));
+
+  const variadic = infer(`function f(...xs: [number, ...string[]]): void {}\nfunction invoke(args: any) { f(...args); }\n`);
+  assert.match(variadic.output, /function invoke\(args: \[number, \.\.\.string\[\]\]\)/);
+  assert.ok(checkStrict('case.ts', variadic.output).ok, checkStrict('case.ts', variadic.output).diagnostics.join('\n'));
+});
+
+test('P1: a constructor tuple-rest spread infers the tuple, not an array', () => {
+  const { output } = infer(`class Widget { constructor(...xs: [number, string]) {} }\nfunction build(args: any) { return new Widget(...args); }\n`);
+  assert.match(output, /function build\(args: \[number, string\]\)/);
+  assert.ok(checkStrict('case.ts', output).ok, checkStrict('case.ts', output).diagnostics.join('\n'));
+});
+
+test('P1: a generic rest parameter never emits an out-of-scope type parameter name', () => {
+  // A rest parameter typed by a generic `T` resolves to the type parameter,
+  // whose name is not visible at the spread call site. The constraint must
+  // fall back to a legal, compilable type instead of leaking `T` (TS2304).
+  const { output } = infer(`function f<T extends [number, string]>(...xs: T): void {}\nfunction invoke(args: any) { f(...args); }\n`);
+  assert.doesNotMatch(output, /function invoke\(args: T\)/);
+  assert.ok(checkStrict('case.ts', output).ok, checkStrict('case.ts', output).diagnostics.join('\n'));
+});
+
+test('P1: a sibling d.ts class-member contract does not leak onto a same-named local class', () => {
+  // Only the exported `Widget` is the public contract. The local `Widget`
+  // declared inside run() must be inferred from its own constructor write.
+  // Matching by `Class.member` spelling alone used to inject the exported
+  // class's Record<string,string> onto the local value and break
+  // `this.value.toFixed(2)`.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'p1-class-dts-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(
+    api,
+    'export class Widget { value: any; constructor() { this.value = {}; } }\n' +
+      'export function run(): object { class Widget { value: any; constructor() { this.value = 1.5; } test() { return this.value.toFixed(2); } } return new Widget(); }\n',
+    'utf8',
+  );
+  fs.writeFileSync(
+    dts,
+    'export declare class Widget { value: Record<string, string>; }\n' +
+      'export declare function run(): object;\n',
+    'utf8',
+  );
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const out = results.find((r) => r.fileName === api)?.output ?? '';
+    assert.match(out, /export class Widget \{ value: Record<string, string>/); // export keeps its contract
+    assert.equal((out.match(/Record<string, string>/g) ?? []).length, 1); // local must not inherit it
+    assert.match(out, /class Widget \{ value: number;/); // local inferred from its own write
+    const strict = checkStrict(api, out);
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -52,17 +52,39 @@ function spreadCallConstraint(
     if (declaration === undefined || !ts.isParameter(declaration) || declaration.dotDotDotToken === undefined) {
       continue;
     }
-    const restType = ctx.checker.getTypeOfSymbolAtLocation(parameter, call);
-    // Arrays and tuples are both TypeReference in the checker's model.
-    const elementType =
-      (ctx.checker.isArrayType(restType) || ctx.checker.isTupleType(restType)) &&
-      (restType.flags & ts.TypeFlags.Object) !== 0
-        ? ctx.checker.getTypeArguments(restType as ts.TypeReference)[0]
-        : undefined;
-    if (elementType !== undefined) {
-      const text = widenedTypeText(ctx.checker, elementType, call);
-      if (text !== undefined && text !== 'never' && text !== 'any') {
-        return `${text}[]`;
+    let restType = ctx.checker.getTypeOfSymbolAtLocation(parameter, call);
+    // A rest parameter typed by a generic (`...xs: T extends [number, string]`)
+    // resolves to `any` at the call site — no constraint is visible there.
+    // Recover the concrete shape from the declaration's type-parameter base
+    // constraint so a tuple-constrained generic still yields the tuple, rather
+    // than an `unknown[]` that TS rejects as a tuple spread (TS2556). (Review P1.)
+    if ((restType.flags & ts.TypeFlags.Any) !== 0) {
+      const declaredType = ctx.checker.getTypeAtLocation(declaration);
+      if ((declaredType.flags & ts.TypeFlags.TypeParameter) !== 0) {
+        const base = ctx.checker.getBaseConstraintOfType(declaredType);
+        if (base !== undefined) {
+          restType = base;
+        }
+      }
+    }
+    // Arrays and tuples are both TypeReference in the checker's model, but a
+    // tuple rest parameter (`...args: [number, string]`) must NOT be collapsed
+    // to an element array: the spread argument has to be exactly that tuple,
+    // or TS rejects it (TS2556). Preserve the full tuple structure — including
+    // optional (`?`) and variadic (`...T[]`) elements. Only a genuine array
+    // rest parameter contributes an element type plus `[]`. (Review P1 tuple.)
+    if ((restType.flags & ts.TypeFlags.Object) !== 0 && ctx.checker.isTupleType(restType)) {
+      const tupleText = widenedTypeText(ctx.checker, restType, call);
+      if (tupleText !== undefined && tupleText !== 'never' && tupleText !== 'any') {
+        return tupleText;
+      }
+    } else if ((restType.flags & ts.TypeFlags.Object) !== 0 && ctx.checker.isArrayType(restType)) {
+      const elementType = ctx.checker.getTypeArguments(restType as ts.TypeReference)[0];
+      if (elementType !== undefined) {
+        const text = widenedTypeText(ctx.checker, elementType, call);
+        if (text !== undefined && text !== 'never' && text !== 'any') {
+          return `${text}[]`;
+        }
       }
     }
     // A rest parameter that is `any`/unresolved: constrain to an array so the
