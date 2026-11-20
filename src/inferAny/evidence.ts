@@ -19,6 +19,49 @@ import { callsOf, referencesOf } from './collect.js';
  * Conservative: anything we cannot prove always-terminating counts as a
  * possible fall-through, which only ever widens the type (safe).
  */
+/**
+ * For a call-argument spread `f(...x)`, resolve the callee's rest parameter
+ * through the checker and return an array-type constraint for `x` (e.g.
+ * `number[]` for `Math.max(...x)`, `string[]` for a shadowed local with a
+ * `...xs: string[]` rest). Returns undefined when no rest parameter can be
+ * resolved, so the caller can fall back to `unknown[]`.
+ *
+ * Using the resolved signature — rather than the callee's source text — is
+ * essential: a locally shadowed `Math.max` must not inherit the global one's
+ * `number[]` contract (Architecture review 5).
+ */
+function spreadCallConstraint(call: ts.CallExpression, ctx: InferenceContext): string | undefined {
+  const signature = ctx.checker.getResolvedSignature(call);
+  if (signature === undefined) {
+    return undefined;
+  }
+  for (const parameter of signature.parameters) {
+    const declaration = parameter.declarations?.[0];
+    if (declaration === undefined || !ts.isParameter(declaration) || declaration.dotDotDotToken === undefined) {
+      continue;
+    }
+    // The rest parameter's type is an array/tuple; its element type is what
+    // each spread element must be assignable to.
+    const restType = ctx.checker.getTypeOfSymbolAtLocation(parameter, call);
+    // Arrays and tuples are both TypeReference in the checker's model.
+    const elementType =
+      (ctx.checker.isArrayType(restType) || ctx.checker.isTupleType(restType)) &&
+      (restType.flags & ts.TypeFlags.Object) !== 0
+        ? ctx.checker.getTypeArguments(restType as ts.TypeReference)[0]
+        : undefined;
+    if (elementType !== undefined) {
+      const text = widenedTypeText(ctx.checker, elementType, call);
+      if (text !== undefined && text !== 'never' && text !== 'any') {
+        return `${text}[]`;
+      }
+    }
+    // A rest parameter that is `any`/unresolved: constrain to an array so the
+    // spread itself stays legal, without asserting an element type.
+    return 'unknown[]';
+  }
+  return undefined;
+}
+
 function statementsMayFallThrough(statements: readonly ts.Statement[]): boolean {
   for (const statement of statements) {
     if (statementAlwaysTerminates(statement)) {
@@ -359,30 +402,28 @@ export function constraintsFromReference(
     }
   }
 
-  // Spreading `[...x]` or `f(...x)` requires x to be iterable. `unknown[]` is
-  // the strict-safe stand-in (same guarantee as for-of), as a contravariant
-  // constraint so a concrete source can still refine it. Object spread
-  // (`{...x}`) is deliberately excluded: spreading accepts any value there.
+  // Spread has two distinct type requirements in TypeScript:
+  //   - array/iterable spread  `[...x]`  → x only needs to be Iterable<T>
+  //     (a generator or Set is equally valid — Architecture review 1.6).
+  //   - call-argument spread    `f(...x)` → x must be an array/tuple type;
+  //     `Iterable<T>` is NOT accepted as spread arguments (TS2556/TS2345).
+  // Object spread (`{...x}`) is excluded entirely: it accepts any value.
   if (
     ts.isSpreadElement(parent) &&
     parent.expression === reference &&
     !ts.isObjectLiteralExpression(parent.parent)
   ) {
-    // `Math.max(...xs)` / `Math.min(...xs)` declare a `...values: number[]`
-    // rest parameter. That is a definite contravariant constraint on every
-    // spread element — not a name heuristic (the signature is in lib.d.ts).
-    // Without it the element stays `unknown` and the spread is TS2345.
     const call = parent.parent;
-    const calleeText =
-      ts.isCallExpression(call) && ts.isPropertyAccessExpression(call.expression)
-        ? call.expression.getText(call.getSourceFile())
-        : undefined;
-    if (calleeText === 'Math.max' || calleeText === 'Math.min') {
-      // A real lib.d.ts rest signature (`...values: number[]`), not a guess.
-      addConstraint(evidence, 'number[]');
+    if (ts.isCallExpression(call)) {
+      // Resolve the callee's signature through the checker (NOT by callee name):
+      // a locally shadowed `Math.max` must not inherit the global's number[].
+      // The rest parameter's element type gives a definite contravariant
+      // constraint (e.g. `...values: number[]` → constrain the argument to
+      // `number[]`). Without it the element stays `unknown` and the spread is
+      // TS2345. Fall back to `unknown[]` (an array, so spread stays legal).
+      addConstraint(evidence, spreadCallConstraint(call, ctx) ?? 'unknown[]');
     } else {
-      // Spreading requires an Iterable, not an Array — a generator or Set is
-      // equally valid (Architecture review 1.6).
+      // Array / iterable spread — Iterable is sufficient and more permissive.
       addConstraint(evidence, 'Iterable<unknown>');
     }
   }

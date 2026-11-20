@@ -1485,3 +1485,56 @@ test('B4: a parenthesized anonymous default-export arrow is public API', () => {
   const { output } = infer(`export default ((v: any) => String(v));\n`);
   assert.match(output, /\(v: any\)/);
 });
+
+// --- Review round 4: spread calls, d.ts matching, Math shadowing ---
+test('R4-2: call-argument spread uses the callee rest type, not Iterable', () => {
+  // `f(...x)` requires an array/tuple, NOT Iterable (TS2345/TS2556). With no
+  // call-site evidence, the constraint must come from the resolved signature.
+  const { output } = infer(`function sum(...values: number[]): number { return values.reduce((a, b) => a + b, 0); }\nfunction call(values: any) { return sum(...values); }\n`);
+  assert.match(output, /function call\(values: number\[\]\)/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R4-5: a locally shadowed Math.max is not treated as the global one', () => {
+  // Matching by callee text would inherit the global `...number[]` contract.
+  // The checker resolves the local rest signature `...string[]` instead.
+  const { output } = infer(`const Math = { max: (...xs: string[]) => xs.join(','), } as const;\nexport function test(values: any) { return Math.max(...values); }\n`);
+  assert.match(output, /function test\(values: string\[\]\)/);
+  const strict = checkStrict('case.ts', output);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R4-3: a d.ts class method does not pick up a same-named top-level function signature', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r4-dts-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(api, `export function process(value: any): void {}\nexport class Worker { process(value: any): void {} }\n`, 'utf8');
+  fs.writeFileSync(dts, `export declare function process(value: string): void;\nexport declare class Worker { process(value: number): void; }\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const out = results.find((r) => r.fileName === api)?.output ?? '';
+    assert.match(out, /export function process\(value: string\)/); // top-level: its own d.ts
+    assert.match(out, /Worker[\s\S]*process\(value: number\)/); // method: Class.member contract
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('R4-3b: a d.ts constructor signature is restored onto the class constructor', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r4-ctor-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(api, `export class Client { constructor(value: any) { this.value = value; } value: any; }\n`, 'utf8');
+  fs.writeFileSync(dts, `export declare class Client { constructor(value: number); value: number; }\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const out = results.find((r) => r.fileName === api)?.output ?? '';
+    assert.match(out, /constructor\(value: number\)/);
+    assert.match(out, /value: number;/);
+    const strict = checkStrict(api, out);
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

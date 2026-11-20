@@ -130,7 +130,12 @@ export function parseDeclarationFile(dtsPath: string): DeclarationProvider {
     } else if (ts.isClassDeclaration(statement) && statement.name !== undefined) {
       const className = statement.name.text;
       for (const member of statement.members) {
-        if (
+        if (ts.isConstructorDeclaration(member)) {
+          // Constructor signatures carry the parameter contract for
+          // `new Class(...)`. Keyed as `Class.constructor` and matched by the
+          // parameter branch of declaredTypeOf via the ctor's class name.
+          members.set(`${className}.constructor`, signatureOf(member, sourceFile));
+        } else if (
           (ts.isMethodDeclaration(member) || ts.isMethodSignature(member)) &&
           member.name !== undefined &&
           ts.isIdentifier(member.name)

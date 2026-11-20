@@ -128,12 +128,14 @@ export function declaredTypeOf(
     if (checker !== undefined && !isExportedDeclaration(fn, checker)) {
       return undefined;
     }
-    const fnName = functionName(fn);
+    // Constructors have no function name; signatureFor() handles them via the
+    // `Class.constructor` member key, so a placeholder name is sufficient.
+    const fnName = ts.isConstructorDeclaration(fn) ? 'constructor' : functionName(fn);
     if (fnName === undefined) {
       return undefined;
     }
     const index = fn.parameters.indexOf(owner);
-    const sig = provider.functions.get(fnName) ?? memberSignature(provider, fn);
+    const sig = signatureFor(provider, fn, fnName);
     if (sig === undefined || index < 0 || index >= sig.params.length) {
       return undefined;
     }
@@ -170,7 +172,7 @@ export function declaredTypeOf(
     if (fnName === undefined) {
       return undefined;
     }
-    const sig = provider.functions.get(fnName) ?? memberSignature(provider, owner);
+    const sig = signatureFor(provider, owner, fnName);
     if (sig?.returnType === undefined) {
       return undefined;
     }
@@ -227,7 +229,7 @@ export function dtsGenericParamInsertionFor(
   if (fnName === undefined) {
     return undefined;
   }
-  const sig = provider.functions.get(fnName) ?? memberSignature(provider, fn);
+  const sig = signatureFor(provider, fn, fnName);
   const typeParams = sig?.typeParams;
   if (typeParams === undefined) {
     return undefined;
@@ -252,6 +254,34 @@ export function dtsGenericParamInsertionFor(
       ? fn.name.end
       : fn.getStart();
   return { typeParams, insertPos };
+}
+
+/**
+ * Resolve the d.ts signature for a function-like declaration. A class method
+ * must match `Class.member` — it must NEVER fall back to a same-named top-level
+ * function (`provider.functions.get(fnName)`), or a `Worker.process` would pick
+ * up a free `process(value: string)` contract meant for a different symbol.
+ * Only genuinely top-level functions consult `functions` (Architecture review 3).
+ */
+function signatureFor(
+  provider: DeclarationProvider,
+  node: ts.Node,
+  fnName: string,
+): DtsSignature | undefined {
+  // A constructor has no `name`, so memberSignature cannot handle it. Match
+  // the `Class.constructor` key collected by parseDeclarationFile instead.
+  if (ts.isConstructorDeclaration(node)) {
+    const parent = node.parent;
+    if (ts.isClassDeclaration(parent) && parent.name !== undefined) {
+      const value = provider.members.get(`${parent.name.text}.constructor`);
+      return typeof value === 'string' ? undefined : value;
+    }
+    return undefined;
+  }
+  if (isClassMember(node)) {
+    return memberSignature(provider, node);
+  }
+  return provider.functions.get(fnName);
 }
 
 function memberSignature(
