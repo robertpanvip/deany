@@ -1090,6 +1090,64 @@ test('S4: a sibling .d.ts restores a concrete parameter type over usage inferenc
   }
 });
 
+test('G2: a sibling .d.ts generic contract injects the type-parameter declaration', () => {
+  // The d.ts fills any-slots with `T`, but the implementation has no `<T>` of
+  // its own. Without injecting the type-parameter list the output references
+  // an undeclared name (TS2304). Must be injected once per function.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'g2-dts-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(api, `export function id(value: any): any { return value; }\n`, 'utf8');
+  fs.writeFileSync(dts, `export declare function id<T>(value: T): T;\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const producer = results.find((result) => result.fileName === api);
+    const out = producer?.output ?? '';
+    assert.match(out, /export function id<T>\(value: T\): T/);
+    // Exactly one `<T>` — not duplicated despite two any slots (param + return).
+    assert.equal((out.match(/<T>/g) ?? []).length, 1);
+    assert.equal(checkStrict(api, out).ok, true, checkStrict(api, out).diagnostics.join('\n'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('G2: a multi-param generic contract injects once and fills every slot', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'g2-dts2-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(
+    api,
+    `export function pair(a: any, b: any): any { return [a, b]; }\n`,
+    'utf8',
+  );
+  fs.writeFileSync(dts, `export declare function pair<T, U>(a: T, b: U): [T, U];\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const out = results.find((result) => result.fileName === api)?.output ?? '';
+    assert.match(out, /export function pair<T, U>\(a: T, b: U\): \[T, U\]/);
+    assert.equal(checkStrict(api, out).ok, true, checkStrict(api, out).diagnostics.join('\n'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('G2: a non-generic d.ts contract does not inject a type parameter', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'g2-dts3-'));
+  const api = path.join(directory, 'api.ts');
+  const dts = path.join(directory, 'api.d.ts');
+  fs.writeFileSync(api, `export function id(value: any): any { return value; }\n`, 'utf8');
+  fs.writeFileSync(dts, `export declare function id(value: string): string;\n`, 'utf8');
+  try {
+    const results = inferAnyInProject([api, dts], compilerOptions);
+    const out = results.find((result) => result.fileName === api)?.output ?? '';
+    assert.match(out, /export function id\(value: string\): string/);
+    assert.doesNotMatch(out, /id</);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('S4: all module export forms keep public parameters un-narrowed, private ones narrow', () => {
   // Locks the export-surface detection: ESM export/export{}/default/exported
   // class methods and CommonJS module.exports all protect the public contract;

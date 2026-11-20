@@ -180,6 +180,80 @@ export function declaredTypeOf(
   return undefined;
 }
 
+/**
+ * When a sibling `.d.ts` declares a generic signature (e.g. `id<T>(x: T): T`),
+ * its type parameters are used to fill the implementation's `any` slots. But
+ * the implementation itself was written without `<T>`, so the filled slots
+ * reference an undeclared name (TS2304). This reports where to inject the
+ * type-parameter list onto the function signature, once per function.
+ *
+ * Only fires when: the owner is a signature slot (parameter or function return),
+ * the function is exported (d.ts is a public contract), the d.ts signature
+ * actually has type params, and the declared slot text references one of them
+ * (so we never inject an unused `<T>`).
+ */
+export interface GenericParamInsertion {
+  readonly typeParams: string;
+  readonly insertPos: number;
+}
+
+export function dtsGenericParamInsertionFor(
+  owner: ts.Node,
+  provider: DeclarationProvider | undefined,
+  checker: ts.TypeChecker,
+): GenericParamInsertion | undefined {
+  if (provider === undefined) {
+    return undefined;
+  }
+  let fn: ts.Node | undefined;
+  if (ts.isParameter(owner)) {
+    fn = owner.parent;
+  } else if (isFunctionLikeNode(owner)) {
+    fn = owner;
+  } else {
+    return undefined;
+  }
+  if (fn === undefined || !isFunctionLikeNode(fn)) {
+    return undefined;
+  }
+  // Already generic in the source — do not inject a duplicate list.
+  if (fn.typeParameters !== undefined && fn.typeParameters.length > 0) {
+    return undefined;
+  }
+  if (!isExportedDeclaration(fn, checker)) {
+    return undefined;
+  }
+  const fnName = functionName(fn);
+  if (fnName === undefined) {
+    return undefined;
+  }
+  const sig = provider.functions.get(fnName) ?? memberSignature(provider, fn);
+  const typeParams = sig?.typeParams;
+  if (typeParams === undefined) {
+    return undefined;
+  }
+  // The slot this `any` occupies must actually use a declared type parameter.
+  const declared = declaredTypeOf(owner, provider, checker);
+  if (declared === undefined) {
+    return undefined;
+  }
+  const names = typeParams
+    .slice(1, -1)
+    .split(',')
+    .map((part) => part.trim().match(/^[A-Za-z_$][\w$]*/)?.[0])
+    .filter((name): name is string => name !== undefined);
+  if (!names.some((name) => new RegExp(`\\b${name}\\b`).test(declared))) {
+    return undefined;
+  }
+  // Insert just after a named function's name, or before an arrow/anonymous
+  // function's parameter list.
+  const insertPos =
+    'name' in fn && fn.name !== undefined && ts.isIdentifier(fn.name)
+      ? fn.name.end
+      : fn.getStart();
+  return { typeParams, insertPos };
+}
+
 function memberSignature(
   provider: DeclarationProvider,
   node: ts.Node,

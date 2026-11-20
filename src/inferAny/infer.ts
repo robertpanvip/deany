@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import type { AnySite, InferAnyOptions, InferFileResult } from './types.js';
 import { findSiblingDts, parseDeclarationFile } from '../dts.js';
 import type { DeclarationProvider } from '../dts.js';
-import { declaredTypeOf } from './publicApi.js';
+import { declaredTypeOf, dtsGenericParamInsertionFor } from './publicApi.js';
 import { DEFAULT_INFER_OPTIONS, createContext, createTable } from './state.js';
 import { buildInferenceTable, ownerType } from './table.js';
 import { collectAnyOwners, isReturnTypeAnnotationOf, isUnassignedLetWithoutInit, wrapAsyncReturnForInfer } from './collect.js';
@@ -56,6 +56,9 @@ export function inferAnyInProject(
     const source = sourceFile.getFullText();
     const edits: Array<{ start: number; end: number; text: string }> = [];
     const sites: AnySite[] = [];
+    // A generic signature's `<T>` is injected once per function, keyed by the
+    // insertion position (multiple `any` slots in one function share it).
+    const injectedTypeParams = new Set<number>();
 
     const visit = (node: ts.Node): void => {
       if (node.kind === ts.SyntaxKind.AnyKeyword) {
@@ -168,6 +171,23 @@ export function inferAnyInProject(
               end: node.end,
               text: parenthesizeIfComposite(usable),
             });
+            // A sibling `.d.ts` generic contract (`id<T>(x: T): T`) fills the
+            // implementation's `any` slots with `T`. The source function has no
+            // `<T>` of its own, so declare it on the signature or the result is
+            // an undeclared type name (TS2304). Inject once per function.
+            // (Line-by-line/泛型探索 bug G2.)
+            if (sourceFile !== undefined) {
+              const provider = ctx.dtsProviders?.get(sourceFile.fileName);
+              const generic = dtsGenericParamInsertionFor(owner, provider, ctx.checker);
+              if (generic !== undefined && !injectedTypeParams.has(generic.insertPos)) {
+                injectedTypeParams.add(generic.insertPos);
+                edits.push({
+                  start: generic.insertPos,
+                  end: generic.insertPos,
+                  text: generic.typeParams,
+                });
+              }
+            }
             // `let v: any;` that is never initialized/assigned: narrowing to a
             // concrete type would make TS start definite-assignment analysis
             // and emit TS2454 at every read (the original `any` never did).
