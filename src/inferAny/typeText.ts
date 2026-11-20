@@ -122,23 +122,35 @@ export function objectConstructorResult(ctx: InferenceContext, node: ts.Node): s
 }
 
 /**
- * `a || fallback` / `a ?? fallback`: the right operand is a value the
- * expression genuinely produces when the left is falsy. When the checker types
- * the whole logical expression as `any`/`unknown` — typically because the left
- * side references an API lib.d.ts does not declare (e.g. the non-standard
- * `Symbol.observable`, which TS2339-poison to `any`) — that fallback is the only
- * concrete evidence available. Use its type instead of degrading to bare
- * `unknown`. This is observed evidence, never a fabricated type: it only fires
- * when the checker gave up AND the fallback has a concrete type of its own.
- * (A normal `T | null || fallback` never reaches here because the checker
- * already produced a concrete union type.)
+ * `a || fallback` / `a ?? fallback` whose checker type is opaque (`any` or
+ * `unknown`). The two operands must be treated differently:
+ *
+ * - A genuine `any` left operand (e.g. the non-standard `Symbol.observable`,
+ *   which checkJs marks `any` with TS2339) makes the WHOLE logical expression
+ *   `any`: `any | T === any` and `any ?? T === any`. The honest type is `any`,
+ *   NOT the fallback's concrete type — the non-standard member could be a
+ *   `symbol` at runtime (when polyfilled), so narrowing to the `'@@observable'`
+ *   string fallback would be a lie. Degrading to `unknown` is also wrong: it
+ *   breaks otherwise-valid assignments such as `PropertyKey = ...` (TS2322).
+ *   Keep `any`: it is what the type system actually computes here.
+ *
+ * - An `unknown` left operand is an inference hole, not a real `any`. There the
+ *   fallback's concrete type is legitimate observed evidence (the right operand
+ *   is genuinely produced when the left is falsy), so recover it instead of
+ *   collapsing to bare `unknown`.
+ *
+ * A normal `T | null || fallback` never reaches here because the checker has
+ * already produced a concrete union type.
  */
 function logicalFallbackType(ctx: InferenceContext, node: ts.Node): string | undefined {
   if (!ts.isBinaryExpression(node)) return undefined;
   const op = node.operatorToken.kind;
   if (op !== ts.SyntaxKind.BarBarToken && op !== ts.SyntaxKind.QuestionQuestionToken) return undefined;
   const leftType = ctx.checker.getTypeAtLocation(node.left);
-  if ((leftType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return undefined;
+  if (leftType.flags & ts.TypeFlags.Any) {
+    return 'any';
+  }
+  if ((leftType.flags & ts.TypeFlags.Unknown) === 0) return undefined;
   const fallback = typeText(ctx, node.right);
   if (fallback === undefined || fallback === 'any' || fallback === 'unknown' || fallback === 'never') {
     return undefined;

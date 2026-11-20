@@ -70,12 +70,15 @@ function bare(): any { return; }
   assert.match(output, /function bare\(\): void/);
 });
 
-test('recovers a concrete return type from an || fallback when the checker goes opaque', () => {
-  // `Symbol.observable` is non-standard: checkJs types the whole logical
-  // expression as `any`, but the `|| '@@observable'` fallback is a concrete
-  // string value. The function must return `string`, not `unknown` (which made
-  // the binding `PropertyKey = ...unknown` fail TS2322). This is observed
-  // evidence only — deany still does not fabricate a `Symbol.observable` decl.
+test('keeps `any` for an opaque `any || literal` (any | T is any, not the literal)', () => {
+  // `Symbol.observable` is non-standard: checkJs marks it `any` (TS2339), so
+  // `typeof Symbol === 'function' && Symbol.observable` is `any` and the whole
+  // `|| '@@observable'` expression is `any` — TypeScript's `any | string` is
+  // `any`, NOT `string`. The function must return `any`: narrowing to the
+  // string fallback would be a lie (a polyfilled Symbol.observable is a
+  // symbol), and degrading to `unknown` made `PropertyKey = ...unknown` fail
+  // TS2322. deany still does not fabricate a `Symbol.observable` declaration,
+  // so TS2339 at the source expression deliberately remains.
   const { output, cleanup } = convertGuardJs(`
 var $$observable = (function () {
   return typeof Symbol === 'function' && Symbol.observable || '@@observable';
@@ -86,9 +89,11 @@ module.exports = key;
   try {
     assert.match(
       output,
-      /\(function \(\): string \{\s*return typeof Symbol === 'function' && Symbol\.observable \|\| '@@observable';\s*\}\)\(\)/,
+      /\(function \(\): any \{\s*return typeof Symbol === 'function' && Symbol\.observable \|\| '@@observable';\s*\}\)\(\)/,
     );
     assert.doesNotMatch(output, /function \(\): unknown/);
+    // Must NOT over-narrow to the concrete string fallback.
+    assert.doesNotMatch(output, /function \(\): string/);
   } finally {
     cleanup();
   }
