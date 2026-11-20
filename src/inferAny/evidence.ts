@@ -104,6 +104,44 @@ function spreadCallConstraint(
   return `[${elements.join(', ')}]`;
 }
 
+/**
+ * Widened type of a literal operand in a strict-equality comparison, or
+ * undefined when the operand is not a literal (e.g. another binding). Only
+ * self-describing literal syntax counts — this is a compatibility hint for
+ * avoiding TS2367, never a standalone type source. `true`/`false` -> boolean,
+ * string/number/bigint/numeric-negative literals -> their primitive, `null` ->
+ * null. Template expressions and identifiers are excluded deliberately.
+ * (TS strict-regression fix.)
+ */
+function strictEqualityLiteralType(node: ts.Expression): string | undefined {
+  if (
+    node.kind === ts.SyntaxKind.TrueKeyword ||
+    node.kind === ts.SyntaxKind.FalseKeyword
+  ) {
+    return 'boolean';
+  }
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return 'string';
+  }
+  if (ts.isNumericLiteral(node)) {
+    return 'number';
+  }
+  if (ts.isBigIntLiteral(node)) {
+    return 'bigint';
+  }
+  if (
+    ts.isPrefixUnaryExpression(node) &&
+    node.operator === ts.SyntaxKind.MinusToken &&
+    ts.isNumericLiteral(node.operand)
+  ) {
+    return 'number';
+  }
+  if (node.kind === ts.SyntaxKind.NullKeyword) {
+    return 'null';
+  }
+  return undefined;
+}
+
 function statementsMayFallThrough(statements: readonly ts.Statement[]): boolean {
   for (const statement of statements) {
     if (statementAlwaysTerminates(statement)) {
@@ -817,6 +855,25 @@ export function constraintsFromReference(
         operator === ts.SyntaxKind.ExclamationEqualsEqualsToken)
     ) {
       evidence.stringContext = true;
+    }
+    // Strict equality against a literal proves the two sides' types overlap:
+    // TS2367 rejects `string === true`, but `string | boolean === true` is
+    // legal. Record the literal's widened type so a real covariant source can
+    // be unioned with it. `typeof x === '...'` is handled by its own branch
+    // above (a strong source), so skip the unwrapped typeof expression here.
+    // Only literals count — `x === y` (both bindings) proves nothing. These
+    // are compatibility hints, consumed ONLY when a real source exists, so a
+    // bare `x === 'a'` with no other evidence still keeps `any` (P0-2).
+    // (TS strict-regression fix.)
+    if (
+      (operator === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+        operator === ts.SyntaxKind.ExclamationEqualsEqualsToken) &&
+      !ts.isTypeOfExpression(other)
+    ) {
+      const literalType = strictEqualityLiteralType(other);
+      if (literalType !== undefined) {
+        evidence.equalityOperandTypes.push(literalType);
+      }
     }
   }
 

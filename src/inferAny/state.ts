@@ -50,6 +50,7 @@ export function emptyEvidence(): Evidence {
     arrayOwnMethods: new Map<string, string>(),
     methodReturnTypes: new Map<string, string[]>(),
     methodArgumentTypes: new Map<string, string[]>(),
+    equalityOperandTypes: [],
     objectLiteralInit: false,
     stringContext: false,
     ambiguousAdd: false,

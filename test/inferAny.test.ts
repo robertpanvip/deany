@@ -1670,3 +1670,52 @@ test('R14-2: real evidence overrides a variable-name hint', () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('P0: a catch-clause any stays any so the annotation stays legal under strict (TS1196)', () => {
+  const { output, sites } = infer(`
+try { risky(); } catch (e: any) { console.log(e.message); }
+declare function risky(): void;
+`);
+  assert.match(output, /catch \(e: any\)/);
+  assert.ok(sites.some((site) => (site.reason ?? '').includes('TS1196')));
+  const strict = checkStrict('case.ts', output);
+  assert.equal(strict.ok, true, strict.diagnostics.join('\n'));
+});
+
+test('P0: strict-equality literal widens a conflicting source instead of emitting TS2367', () => {
+  // `flag = 'x'` fixes the binding to string, but the source also does
+  // `flag === true`. Emitting `string` alone makes TS reject the comparison
+  // (TS2367: string and boolean have no overlap). The literal operand must be
+  // unioned in so the comparison stays legal.
+  const { output } = infer(`
+declare let flag: any;
+if (flag === true) { flag = 'x'; }
+export const f = flag;
+`);
+  assert.match(output, /flag: \(?boolean \| string\)?;/);
+  const strict = checkStrict('case.ts', output);
+  assert.equal(strict.ok, true, strict.diagnostics.join('\n'));
+});
+
+test('P0: a lone === literal with no real source still keeps any (P0-2 guard)', () => {
+  // The compatibility hint must never become a standalone type source:
+  // `function compared(id: any) { return id === 'x' }` stays `any`, otherwise
+  // a public caller passing a number would break.
+  const { output } = infer(`
+export function compared(id: any): boolean { return id === 'x'; }
+export function isTrue(x: any): boolean { return x === true; }
+`);
+  assert.match(output, /function compared\(id: any\): boolean/);
+  assert.match(output, /function isTrue\(x: any\): boolean/);
+});
+
+test('P0: an equality operand already covered by the source is not duplicated', () => {
+  const { output } = infer(`
+declare let n: any;
+if (n === 5) { n = 5; }
+export const out = n;
+`);
+  assert.match(output, /n: number;/);
+  const strict = checkStrict('case.ts', output);
+  assert.equal(strict.ok, true, strict.diagnostics.join('\n'));
+});

@@ -8,7 +8,7 @@ import { declaredTypeOf, dtsGenericParamInsertionFor } from './publicApi.js';
 import { DEFAULT_INFER_OPTIONS, createContext, createTable } from './state.js';
 import { buildInferenceTable, ownerType } from './table.js';
 import { collectAnyOwners, isReturnTypeAnnotationOf, isUnassignedLetWithoutInit, wrapAsyncReturnForInfer } from './collect.js';
-import { mergeMutationEvidence, ownerOf, parenthesizeIfComposite, projectSlotType, slotPathOf, widenedTypeText } from './util.js';
+import { isCatchClauseVariable, mergeMutationEvidence, ownerOf, parenthesizeIfComposite, projectSlotType, slotPathOf, widenedTypeText } from './util.js';
 import { recordValueSlotType, specialSlotType, structuredSlotType } from './slot.js';
 import { collectMutationEvidence, mutationKindOf } from './mutation.js';
 import { mergeEvidence } from './shape.js';
@@ -110,6 +110,20 @@ export function inferAnyInProject(
         } else {
           const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
           const original = node.getText(sourceFile);
+          // A catch-clause variable may only be annotated `any` or `unknown`
+          // (TS1196). Property evidence such as `e.message` would otherwise be
+          // written back as an object shape and break strict compilation.
+          if (isCatchClauseVariable(owner)) {
+            sites.push({
+              file: fileName,
+              line,
+              start: node.getStart(sourceFile),
+              end: node.end,
+              original,
+              reason: 'catch clause variable must stay any or unknown (TS1196)',
+            });
+            return;
+          }
           const wholeType = ownerType(ctx.table, owner);
           // A sibling `.d.ts` declaration is authoritative (S4). When present,
           // its type — including bare `unknown` — is the contract and must not

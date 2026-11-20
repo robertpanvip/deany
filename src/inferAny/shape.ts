@@ -307,6 +307,47 @@ export function intersectConstraints(constraints: readonly string[]): string[] |
 }
 
 /**
+ * Coarse "type family" used only to detect TS2367 (comparing two unrelated
+ * types with `===`). `null`/`undefined`/`unknown`/`any` overlap with
+ * everything; each primitive is its own family; objects/arrays/functions are
+ * distinct families. A union reports all its members' families, so an operand
+ * matching ANY member counts as an overlap (`string | boolean === true` is
+ * legal). (TS strict-regression fix.)
+ */
+function equalityFamilies(type: string): ReadonlySet<string> {
+  const families = new Set<string>();
+  for (const member of splitTopLevelUnion(type)) {
+    const t = member.trim();
+    if (t === 'any' || t === 'unknown' || t === 'null' || t === 'undefined') {
+      families.add('top');
+    } else if (
+      t === 'string' ||
+      t === 'number' ||
+      t === 'boolean' ||
+      t === 'bigint' ||
+      t === 'symbol'
+    ) {
+      families.add(t);
+    } else {
+      // Objects, arrays, functions, shapes, type references: their own family.
+      families.add(`object:${t}`);
+    }
+  }
+  return families;
+}
+
+/** Whether `a === b` is legal in strict TS (their type families overlap). */
+function equalityOverlaps(a: string, b: string): boolean {
+  const af = equalityFamilies(a);
+  const bf = equalityFamilies(b);
+  if (af.has('top') || bf.has('top')) return true;
+  for (const f of af) {
+    if (bf.has(f)) return true;
+  }
+  return false;
+}
+
+/**
  * Merge variance-tagged evidence into a single concrete type.
  *
  * Covariant `sources` (values the binding receives) form a union: a binding
@@ -539,6 +580,28 @@ export function mergeEvidence(evidence: Evidence): {
     return { type: 'string | number', weak: true };
   } else {
     return { reason: 'no usage evidence' };
+  }
+
+  // Strict equality compatibility (TS2367): `x === <literal>` requires the
+  // operand's type to overlap the inferred type. When a REAL covariant source
+  // or constraint has fixed the binding to a type that does not overlap (e.g.
+  // `x = 'x'` gives string, but the code also does `x === true`), union in the
+  // operand type so the comparison stays legal: `string | boolean === true`
+  // compiles. Only real evidence triggers this — a bare `x === 'a'` with no
+  // other source keeps `any` (P0-2), and weak name/interpolation hints never
+  // get widened. Each operand is checked against the FINAL union so an operand
+  // already covered by one member (e.g. `number` when `number` is present) is
+  // not added. (TS strict-regression fix.)
+  if (
+    (evidence.sources.length > 0 || evidence.constraints.length > 0) &&
+    evidence.equalityOperandTypes.length > 0
+  ) {
+    for (const operand of new Set(evidence.equalityOperandTypes)) {
+      const union = members.join(' | ');
+      if (!equalityOverlaps(union, operand)) {
+        members.push(operand);
+      }
+    }
   }
 
   members = [...new Set(members)].sort();

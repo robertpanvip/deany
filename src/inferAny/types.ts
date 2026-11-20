@@ -172,6 +172,17 @@ export interface Evidence {
    * (string.includes takes a string; arrays also have includes). (Review r17.)
    */
   readonly methodArgumentTypes: Map<string, string[]>;
+  /**
+   * Widened types of literal operands compared with `===` / `!==` against a
+   * reference to this binding (`x === true`, `x === 'a'`, `x === 5`). Strict
+   * TypeScript rejects a comparison whose two sides have no overlap (TS2367),
+   * so once a real covariant source fixes the binding to e.g. `string`, an
+   * observed `x === true` must widen it to `string | boolean` to keep the
+   * emitted code compiling. Recorded as compatibility hints and merged ONLY
+   * when a real source exists — a bare `x === 'a'` with no other evidence must
+   * stay `any` (P0-2 public-API guard). (TS strict-regression fix.)
+   */
+  readonly equalityOperandTypes: string[];
   objectLiteralInit: boolean;
   /** True when the binding was seen only in string-like contexts. Weak hint. */
   stringContext: boolean;

@@ -73,6 +73,20 @@ export function parenthesizeIfComposite(type: string): string {
 }
 
 /**
+ * True for `catch (e: any)` — TypeScript only allows `any` or `unknown` on a
+ * catch-clause variable (TS1196). Collecting property evidence from `e.message`
+ * and writing back an object shape would produce code that cannot compile, so
+ * this slot must stay untouched. (P0 probe, TS explicit-any path.)
+ */
+export function isCatchClauseVariable(owner: ts.Node): boolean {
+  return (
+    ts.isVariableDeclaration(owner) &&
+    owner.parent !== undefined &&
+    ts.isCatchClause(owner.parent)
+  );
+}
+
+/**
  * Find the declaration that owns a type annotation containing `any`.
  * Walking upward handles `any[]`, `Array<any>`, `Map<string, any>`, etc.
  */
