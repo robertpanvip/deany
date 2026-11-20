@@ -7,6 +7,7 @@ import { createContext, createTable } from './state.js';
 import { buildInferenceTable, ownerType } from './table.js';
 import { collectDeclarations } from './collect.js';
 import { typeText } from './typeText.js';
+import { collectImplicitPredicates } from './implicitPredicate.js';
 
 /**
  * True when `param` is the element parameter of a known iteration callback
@@ -153,6 +154,9 @@ export function createUsageResolver(
   const checker = program.getTypeChecker();
   const ctx = createContext(checker, program, createTable());
   buildInferenceTable(collectDeclarations(program), ctx);
+  // Infer implicit type predicates for boolean guards from true-branch usage.
+  // Built once over the whole program so every file's conversion can query it.
+  const predicates = collectImplicitPredicates(ctx);
   return {
     getSourceFile: (fileName) => program.getSourceFile(fileName),
     infer: (owner) => ownerType(ctx.table, owner),
@@ -210,6 +214,19 @@ export function createUsageResolver(
       }
       const apparent = checker.getTypeAtLocation(paramExpr);
       return (apparent.flags & ts.TypeFlags.Any) !== 0;
+    },
+    implicitPredicate: (owner, paramIndex) => {
+      const inferred = predicates.get(owner as ts.SignatureDeclaration);
+      if (inferred === undefined) return undefined;
+      const match = inferred.find((p) => p.paramIndex === paramIndex);
+      return match === undefined
+        ? undefined
+        : {
+            paramIndex: match.paramIndex,
+            paramName: match.paramName,
+            narrowType: match.narrowType,
+            strength: match.strength,
+          };
     },
   };
 }

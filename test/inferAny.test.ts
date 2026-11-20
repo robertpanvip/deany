@@ -4,8 +4,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { test } from 'node:test';
 import * as ts from 'typescript';
-import { inferAnyInProject } from '../src/inferAny.js';
+import { inferAnyInProject, createUsageResolver } from '../src/inferAny.js';
 import { checkStrict } from '../src/check.js';
+import { convertSource } from '../src/convert.js';
 import { buildInferenceTable } from '../src/inferAny/table.js';
 import { createContext, createTable, MAX_FIXED_POINT_ROUNDS } from '../src/inferAny/state.js';
 import { collectAnyOwners } from '../src/inferAny/collect.js';
@@ -1793,3 +1794,121 @@ test('P1: a sibling d.ts class-member contract does not leak onto a same-named l
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+// --- Implicit type predicates: infer `v is T` for boolean guards from the
+// "type mismatch" signal — the guard's parameter reads as wide `any` at the
+// call site, but the guard body / the narrowed branch uses it as a concrete
+// type ('k' in x, typeof x === 'string', x.map(), x instanceof C, ...). --------
+const guardJsOptions: ts.CompilerOptions = {
+  allowJs: true,
+  checkJs: true,
+  noEmit: true,
+  strict: true,
+  target: ts.ScriptTarget.ES2022,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  skipLibCheck: true,
+};
+
+function convertGuardJs(source: string): { output: string; file: string; cleanup: () => void } {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-js-'));
+  const file = path.join(directory, 'case.js');
+  fs.writeFileSync(file, source, 'utf8');
+  const resolver = createUsageResolver([file], guardJsOptions);
+  const output = convertSource(file, source, { banner: false }, resolver).output;
+  return { output, file, cleanup: () => fs.rmSync(directory, { recursive: true, force: true }) };
+}
+
+test('implicit predicate: in-operator in the guarded branch yields `v is object & { key }` (user case)', () => {
+  const { output: out, file, cleanup } = convertGuardJs(`
+function isObject(v) { return v !== null && typeof v === 'object'; }
+function throttle(func, wait, options) {
+  if (isObject(options)) {
+    var leading = 'leading' in options ? options.leading : false;
+    return leading;
+  }
+  return 0;
+}
+module.exports = throttle;
+`);
+  try {
+    assert.match(out, /function isObject\(v: unknown\): v is object & \{ leading: unknown \}/);
+    const strict = checkStrict(file, out, { allowJs: true });
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('implicit predicate: typeof guard body disambiguates a length-only use as `string`, not array', () => {
+  const { output: out, file, cleanup } = convertGuardJs(`
+function isStr(v) { return typeof v === 'string'; }
+function f(x) { if (isStr(x)) { return x.length; } return 0; }
+module.exports = f;
+`);
+  try {
+    assert.match(out, /function isStr\(v: unknown\): v is string\b/);
+    assert.doesNotMatch(out, /v is unknown\[\]/);
+    const strict = checkStrict(file, out, { allowJs: true });
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('implicit predicate: array-only method use yields `v is unknown[]`', () => {
+  const { output: out, file, cleanup } = convertGuardJs(`
+function isArr(v) { return Array.isArray(v); }
+function f(x) { if (isArr(x)) { return x.map(function (y) { return y; }); } return 0; }
+module.exports = f;
+`);
+  try {
+    assert.match(out, /function isArr\(v: unknown\): v is unknown\[\]/);
+    const strict = checkStrict(file, out, { allowJs: true });
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('implicit predicate: instanceof yields `v is C` (class name, not constructor type)', () => {
+  const { output: out, cleanup } = convertGuardJs(`
+function C() {}
+function isC(v) { return v instanceof C; }
+function f(x) { if (isC(x)) { return x; } return 0; }
+module.exports = f;
+`);
+  try {
+    assert.match(out, /function isC\(v: unknown\): v is C\b/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('implicit predicate: callable use yields `v is Function`', () => {
+  const { output: out, cleanup } = convertGuardJs(`
+function isFn(v) { return typeof v === 'function'; }
+function f(x) { if (isFn(x)) { return x(); } return 0; }
+module.exports = f;
+`);
+  try {
+    assert.match(out, /function isFn\(v: unknown\): v is Function\b/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('implicit predicate: a plain boolean function with no type evidence is NOT given a predicate', () => {
+  const { output: out, cleanup } = convertGuardJs(`
+function isReady(v) { return v > 0; }
+function f(x) { if (isReady(x)) { return 1; } return 0; }
+module.exports = f;
+`);
+  try {
+    assert.match(out, /function isReady\(v: number\): boolean\b/);
+    assert.doesNotMatch(out, /isReady.*\bis\s/);
+  } finally {
+    cleanup();
+  }
+});
+

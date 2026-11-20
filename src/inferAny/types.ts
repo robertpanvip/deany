@@ -273,4 +273,20 @@ export interface UsageResolver {
    * rather than a name guess.
    */
   readonly overridesBase: (member: ts.ClassElement) => boolean;
+  /**
+   * Implicit type predicate inferred for a boolean guard function from how its
+   * argument is used in the guard's true branch (e.g. `if (isObject(x)) { 'k'
+   * in x }` proves `isObject` narrows x to `object`). Returns the predicate for
+   * a given parameter position, or undefined when none was inferred. Used by
+   * the converter to emit `v is T` instead of a bare `boolean` return.
+   */
+  readonly implicitPredicate: (
+    owner: ts.Node,
+    paramIndex: number,
+  ) => {
+    readonly paramIndex: number;
+    readonly paramName: string;
+    readonly narrowType: string;
+    readonly strength: number;
+  } | undefined;
 }

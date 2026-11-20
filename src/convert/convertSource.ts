@@ -93,6 +93,24 @@ export function convertSource(
       dtsSig?.typeParams ??
       (typeParameters.length > 0 ? `<${typeParameters.join(', ')}>` : undefined);
 
+    // Implicit type predicate: a boolean guard whose argument is used in a
+    // type-specific way inside its true branch (e.g. `'k' in x`) can be given a
+    // `x is T` return so strict callers narrow. It is a weak hint — real d.ts /
+    // JSDoc @returns signatures outrank it. We pick the strongest parameter's
+    // predicate because TS allows a single return predicate per signature.
+    // (Guard-parameter widening to `unknown` happens in the parameter loop.)
+    let implicitPredicate:
+      | { readonly paramIndex: number; readonly paramName: string; readonly narrowType: string; readonly strength: number }
+      | undefined;
+    if (resolver !== undefined) {
+      for (let i = 0; i < node.parameters.length; i += 1) {
+        const candidate = resolver.implicitPredicate(node, i);
+        if (candidate !== undefined && (implicitPredicate === undefined || candidate.strength > implicitPredicate.strength)) {
+          implicitPredicate = candidate;
+        }
+      }
+    }
+
     let returnAnnotation: string | undefined;
     // A function/method that already carries a return type annotation (e.g. a
     // `declare` class method `bar(): void;`) must not get a second one — that
@@ -110,6 +128,12 @@ export function convertSource(
           returnType = wrapAsyncReturn(returnType, options);
         }
         returnAnnotation = `: ${returnType}`;
+      } else if (implicitPredicate !== undefined && !async) {
+        // Synthesize `param is T`. The narrowed type must be assignable to the
+        // parameter type, so the guarded parameter is widened to `unknown` in
+        // the parameter loop below. No `as` assertion is needed: a guard body
+        // returning boolean always satisfies a type-predicate signature.
+        returnAnnotation = `: ${implicitPredicate.paramName} is ${implicitPredicate.narrowType}`;
       } else {
         const inferred = resolver?.infer(node);
         if (inferred !== undefined) {
@@ -380,6 +404,18 @@ export function convertSource(
           (annotation === ': {}' || annotation === ': unknown')
         ) {
           continue;
+        }
+        // The guarded parameter of a synthesized type predicate must stay wide
+        // enough for `param is T` to be legal: TS requires the narrowed type to
+        // be assignable to the parameter type. An inferred/JSDoc narrower type
+        // (e.g. `object` from `typeof v === 'object'`) would reject `v is string`.
+        // `unknown` accepts every predicate; the guard body still type-checks.
+        if (
+          implicitPredicate !== undefined &&
+          implicitPredicate.paramIndex === index &&
+          annotation !== undefined
+        ) {
+          annotation = ': unknown';
         }
         // A parameter that already has a type annotation (e.g. in a `declare`
         // function) must not get a second one — that emits `a: unknown: string`
