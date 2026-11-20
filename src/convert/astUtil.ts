@@ -172,6 +172,41 @@ export function isReturnPositionArrow(node: ts.Node): boolean {
   return false;
 }
 
+/**
+ * True when a function-like node's own body can produce a value — an
+ * expression-bodied arrow, or a `return <expr>` in its block that is not inside
+ * a nested function. Used to emit `: void` (not `: unknown`) for empty or
+ * side-effect-only functions when no resolver/JSDoc return type is available;
+ * `unknown` on an empty body still compiles, but it misrepresents the contract
+ * and forces callers to handle a value that is never returned (review 0.1.17
+ * P0-1). Nested functions are skipped so their returns do not count.
+ */
+export function functionBodyYieldsValue(node: ts.SignatureDeclaration): boolean {
+  const body = 'body' in node ? (node as ts.FunctionLikeDeclaration).body : undefined;
+  if (body === undefined) {
+    return false; // declaration / overload signature
+  }
+  if (!ts.isBlock(body)) {
+    return true; // expression-bodied arrow `x => x + 1`
+  }
+  let yields = false;
+  const visit = (n: ts.Node): void => {
+    if (yields) {
+      return;
+    }
+    if (n !== body && (ts.isFunctionLike(n) || ts.isClassLike(n))) {
+      return; // nested function/class: its returns are not ours
+    }
+    if (ts.isReturnStatement(n) && n.expression !== undefined) {
+      yields = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  ts.forEachChild(body, visit);
+  return yields;
+}
+
 export function enclosingClass(node: ts.Node): ts.ClassLikeDeclaration | undefined {
   let current: ts.Node | undefined = node.parent;
   while (current !== undefined) {

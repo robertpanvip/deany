@@ -80,3 +80,14 @@ test('parses template names', () => {
   assert.ok(template !== undefined);
   assert.deepEqual(parseTemplateNames(template), ['T', 'U']);
 });
+
+test('R17-8b: a /**** banner at file offset 0 is not a JSDoc block', () => {
+  // The fourth `*` check used to be chained behind `before.length > 0`, so a
+  // banner at the very first character skipped it and leaked bogus typedefs.
+  const banner = `/****\n * @typedef {Nope} G\n */\nlet x;`;
+  assert.equal(parseJsDocBlocks(banner).length, 0);
+  // banners later in the file were already ignored — keep that behavior.
+  assert.equal(parseJsDocBlocks(`const a = 1;\n${banner}`).length, 0);
+  // a genuine JSDoc at offset 0 must still parse.
+  assert.equal(parseJsDocBlocks('/** @typedef {Real} T */\nlet x;').length, 1);
+});

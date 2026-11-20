@@ -7,7 +7,7 @@ import * as ts from 'typescript';
 import { leadingJsDoc, parseJsDocBlocks, parseTemplateNames } from '../jsdoc.js';
 import { extractCustomTypeNames, normalizeJsDocType, normalizeRestType, objectTypeFromDottedParams, objectTypeFromProperties, wrapAsyncReturn } from '../normalize.js';
 
-import { EditBuffer, describe, enclosingClass, findParens, hasModifier, isCallbackArgument, isFunctionLike, isGenerator, isReturnPositionArrow, keywordEnd, parameterName } from './astUtil.js';
+import { EditBuffer, describe, enclosingClass, findParens, functionBodyYieldsValue, hasModifier, isCallbackArgument, isFunctionLike, isGenerator, isReturnPositionArrow, keywordEnd, parameterName } from './astUtil.js';
 import type { FunctionLikeNode } from './astUtil.js';
 import { annotateImplicitAnyCallback, functionTypeFromCallback, typeForTaggedDeclaration } from './callback.js';
 
@@ -120,7 +120,11 @@ export function convertSource(
           // nested function type. Annotating its inner arrows with `: unknown`
           // contradicts that declared type (TS2322) — let TypeScript infer the
           // inner return from the expression instead. See isReturnPositionArrow.
-          returnAnnotation = `: ${async ? 'Promise<unknown>' : options.defaultType}`;
+          // When the body provably yields no value (empty / side-effect-only),
+          // `void` is the honest contract even without a resolver; `unknown`
+          // would describe a value that is never returned (review P0-1).
+          const fallback = functionBodyYieldsValue(node) ? options.defaultType : 'void';
+          returnAnnotation = `: ${async ? wrapAsyncReturn(fallback, options) : fallback}`;
         }
       }
     } else if (returnTag !== undefined) {
@@ -426,16 +430,33 @@ export function convertSource(
     // `any`/`unknown`/`void` guessing.
     let type = doc === undefined ? undefined : typeForTaggedDeclaration(doc, options);
     if (type === undefined) {
-      const fromValue = resolver?.typeOf(node.right) ?? literalTypeOf(node.right);
+      let fromValue = resolver?.typeOf(node.right) ?? literalTypeOf(node.right);
+      // An empty array literal is `Array<never>` to the checker; promoting a
+      // field with that type rejects every later `push` (TS2345). Widen to the
+      // honest `Array<unknown>` (review 0.1.17 P1-16).
+      if (fromValue !== undefined && /^(Array<never>|never\[\])$/.test(fromValue)) {
+        fromValue = 'Array<unknown>';
+      }
       if (
         fromValue !== undefined &&
         fromValue !== 'any' &&
-        fromValue !== 'unknown' &&
         fromValue !== 'never' &&
         fromValue !== 'void'
       ) {
+        // `unknown` is a valid field type under strict mode. Promoting
+        // `this.x = x` (x unresolved) to `x!: unknown` removes TS2339 on later
+        // reads — omitting the field entirely left every `this.x` unresolved
+        // (review 0.1.17 P1-15). `any`/`never`/`void` stay excluded (they add no
+        // useful contract or are illegal as a field type).
         type = fromValue;
       }
+    }
+    if (type === undefined && ts.isIdentifier(node.right)) {
+      // `this.x = x` where `x` is a (possibly still-untyped) constructor
+      // parameter: the resolver has no standalone type for the parameter slot,
+      // so promote the field with the honest `unknown` fallback. Leaving the
+      // field undeclared made every later `this.x` a TS2339 (review P1-15).
+      type = options.defaultType;
     }
     if (type === undefined) {
       return;

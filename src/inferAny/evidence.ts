@@ -389,9 +389,29 @@ export function constraintsFromReference(
         const parameter = signature?.getParameters()[index];
         if (parameter !== undefined) {
           const parameterDecl = parameter.valueDeclaration ?? parameter.declarations?.[0];
+          // A real argument passed to a rest parameter (`console.log(msg)` ->
+          // `...data: any[]`) constrains the argument to the ELEMENT type, not
+          // the whole array. Using the array type produced `msg: any[]` and
+          // `Math.max(v, 1)` -> `v: number[]` (TS2345) — review 0.1.17 P1-14.
+          const isRest =
+            parameterDecl !== undefined &&
+            ts.isParameter(parameterDecl) &&
+            parameterDecl.dotDotDotToken !== undefined;
+          let paramText = symbolTypeText(ctx, parameter, parent);
+          if (isRest && paramText !== undefined) {
+            const restType = ctx.checker.getTypeOfSymbolAtLocation(parameter, parent);
+            const elementType =
+              (ctx.checker.isArrayType(restType) || ctx.checker.isTupleType(restType)) &&
+              (restType.flags & ts.TypeFlags.Object) !== 0
+                ? ctx.checker.getTypeArguments(restType as ts.TypeReference)[0]
+                : undefined;
+            if (elementType !== undefined) {
+              paramText = widenedTypeText(ctx.checker, elementType, parent);
+            }
+          }
           const inferred =
             parameterDecl === undefined ? undefined : ctx.table.declarations.get(parameterDecl);
-          addConstraint(evidence, inferred ?? symbolTypeText(ctx, parameter, parent));
+          addConstraint(evidence, inferred ?? paramText ?? 'unknown');
         }
       }
     }

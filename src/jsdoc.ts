@@ -245,8 +245,15 @@ export function parseJsDocBlocks(source: string): JsDocBlock[] {
       continue;
     }
     // A JSDoc block must not be part of a longer comment like `/****` or `x/**`.
+    // A fourth `*` (`/****`) is a banner, not a JSDoc, at ANY position — check
+    // it independently of the preceding character. The old guard chained it
+    // behind `before.length > 0`, so a banner at file offset 0 (before === '')
+    // short-circuited the whole test and leaked bogus typedefs (P1-8b).
+    if (source[start + 3] === '*') {
+      continue;
+    }
     const before = start === 0 ? '' : source[start - 1] ?? '';
-    if (before.length > 0 && source[start + 3] !== '*' && !/\s/.test(before)) {
+    if (before.length > 0 && !/\s/.test(before)) {
       continue;
     }
 

@@ -165,6 +165,11 @@ export function appendArray(type: string): string {
 
 /** Normalize one JSDoc type expression into valid TypeScript type syntax. */
 export function normalizeJsDocType(raw: string, options: ConvertOptions = DEFAULT_OPTIONS): string {
+  // The exported API may be called with a partial options object (e.g. `{}`).
+  // Merge defaults here so `unknownForLoose`/`defaultType` never come back
+  // undefined — without this, `normalizeJsDocType('*', {})` emitted `any`
+  // instead of `unknown` (review 0.1.17 P2-1).
+  options = { ...DEFAULT_OPTIONS, ...options };
   let type = raw.trim().replace(/\s+/g, ' ');
   if (type.length === 0) {
     return options.defaultType;

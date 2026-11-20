@@ -499,3 +499,59 @@ test('batch conversion isolates a crashing file and still converts the rest', ()
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- Review 0.1.17: real reproductions fixed in this round ---
+test('R17-1: no-resolver API emits void for empty / side-effect-only bodies', () => {
+  // The library API (no UsageResolver) used to stamp `: unknown` on an empty
+  // body — misleading and it forced callers to handle a value never returned.
+  const noop = convertSource('a.js', 'function noop(a) {}', { banner: false }).output;
+  assert.match(noop, /function noop\(a: unknown\): void \{\}/);
+  const arrow = convertSource('a.js', 'const f = (n) => {};', { banner: false }).output;
+  assert.match(arrow, /const f = \(n: unknown\): void => \{\}/);
+  const method = convertSource('a.js', 'class A { m() {} }', { banner: false }).output;
+  assert.match(method, /m\(\): void \{\}/);
+  // A body that DOES return a value must keep the honest unknown fallback.
+  const valued = convertSource('a.js', 'function id(a) { return a; }', { banner: false }).output;
+  assert.match(valued, /function id\(a: unknown\): unknown/);
+});
+
+test('R17-15: constructor this.x assignments promote fields even when the RHS is unresolved', () => {
+  // Promoting an unresolved `this.x = x` to `x!: unknown` removes the TS2339
+  // on every later `this.x` read. It is an honest fallback: the actual type
+  // cannot be recovered here (the checker has no standalone type for x). A
+  // concrete-type consumer like Math.hypot may still need a JSDoc annotation
+  // on x — that is a separate, deeper inference problem.
+  const out = convertJsWithResolver('a.js',
+    'export class Pt { constructor(x, y) { this.x = x; this.y = y; } dist() { return this.x; } }');
+  assert.match(out, /x!: unknown;/);
+  assert.match(out, /y!: unknown;/);
+  const strict = checkStrict('a.ts', out);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R17-16: an empty-array field widens to Array<unknown>, not Array<never>', () => {
+  const out = convertJsWithResolver('a.js',
+    'export class Bag { constructor() { this.items = []; } add(i) { this.items.push(i); } }');
+  assert.match(out, /items!: Array<unknown>/);
+  assert.doesNotMatch(out, /Array<never>/);
+  const strict = checkStrict('a.ts', out);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R17-14: an argument passed to a rest parameter takes the element type', () => {
+  // console.log(msg) / Math.max(v,1) used to make msg: any[] / v: number[]
+  // (TS2345). The rest slot constrains to the ELEMENT type, not the array.
+  const out = convertJsWithResolver('a.js', [
+    'export function logIt(msg) { console.log(msg); }',
+    'export function mx(v) { return Math.max(v, 1); }',
+  ].join('\n'));
+  assert.match(out, /function logIt\(msg: unknown\)/);
+  assert.match(out, /function mx\(v: number\)/);
+  assert.doesNotMatch(out, /msg: Array/);
+  assert.doesNotMatch(out, /v: Array/);
+});
+
+test('R17-19a: checkStrict includes DOM globals so console does not spuriously fail', () => {
+  const result = checkStrict('a.ts', "function f() { console.log('x'); }\n");
+  assert.ok(result.ok, result.diagnostics.join('\n'));
+});

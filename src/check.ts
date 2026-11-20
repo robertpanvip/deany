@@ -108,7 +108,10 @@ export function checkStrict(
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.ESNext,
     moduleResolution: ts.ModuleResolutionKind.Bundler,
-    lib: ['lib.es2022.d.ts'],
+    // `dom` supplies browser globals (console, setTimeout, ...) that converted
+    // JS commonly references. Without it --check reports spurious TS2584 for
+    // perfectly valid code (review 0.1.17 P1-19a).
+    lib: ['lib.es2022.d.ts', 'lib.dom.d.ts'],
     skipLibCheck: true,
     noUncheckedIndexedAccess: true,
     noImplicitOverride: true,

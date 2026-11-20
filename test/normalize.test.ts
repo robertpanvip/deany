@@ -148,3 +148,11 @@ test('normalizes nested/curried JSDoc function types (no greedy param swallow)',
   // Single-level and multi-param forms unchanged.
   assert.equal(normalizeJsDocType('function(string, number): boolean', DEFAULT_OPTIONS), '(arg0: string, arg1: number) => boolean');
 });
+
+test('R17-P2-1: normalizeJsDocType merges defaults for partial options', () => {
+  // The exported API may be called with `{}`; loose types must still become
+  // unknown (DEFAULT_OPTIONS.unknownForLoose) rather than any.
+  assert.equal(normalizeJsDocType('*', {} as any), 'unknown');
+  assert.equal(normalizeJsDocType('?', {} as any), 'unknown');
+  assert.equal(normalizeJsDocType('', {} as any), 'unknown');
+});
