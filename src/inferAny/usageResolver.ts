@@ -8,6 +8,7 @@ import { buildInferenceTable, ownerType } from './table.js';
 import { collectDeclarations } from './collect.js';
 import { typeText } from './typeText.js';
 import { collectImplicitPredicates } from './implicitPredicate.js';
+import { moduleNamespaceType } from './moduleNamespace.js';
 
 /**
  * True when `param` is the element parameter of a known iteration callback
@@ -228,5 +229,7 @@ export function createUsageResolver(
             strength: match.strength,
           };
     },
+    moduleNamespaceType: (requireCall) =>
+      ts.isCallExpression(requireCall) ? moduleNamespaceType(requireCall, ctx, predicates) : undefined,
   };
 }

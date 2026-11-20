@@ -289,4 +289,13 @@ export interface UsageResolver {
     readonly narrowType: string;
     readonly strength: number;
   } | undefined;
+  /**
+   * Inline type text for a relative CommonJS `require('./mod')` call, built from
+   * the required file's exports in the same program and reusing deany's inferred
+   * signatures (including implicit predicates). Used to type a requiring binding
+   * so `mod.guard(x)` narrows across the file boundary. Returns undefined when
+   * the specifier is not relative, the module is unresolved, or it has no
+   * discoverable exports. (Cross-file require.)
+   */
+  readonly moduleNamespaceType: (requireCall: ts.Node) => string | undefined;
 }

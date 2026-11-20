@@ -468,6 +468,16 @@ export function convertSource(
     if (type === undefined) {
       type = doc === undefined ? undefined : typeForTaggedDeclaration(doc, options);
     }
+    // A relative CommonJS `require('./mod')` initializer prints as opaque
+    // `any` to the checker, leaving the binding `unknown` and breaking every
+    // `mod.fn(...)` call (TS18046). Rebuild the module's export shape from the
+    // required file in the same program, reusing inferred signatures and
+    // implicit predicates so cross-file guards still narrow. This is the real
+    // export contract, so it outranks weak name-hint inference from `infer`.
+    // The type is inlined, so strict-checking the caller needs no sibling file.
+    if (type === undefined && node.initializer !== undefined && ts.isCallExpression(node.initializer)) {
+      type = resolver?.moduleNamespaceType(node.initializer);
+    }
     if (type === undefined) {
       type = resolver?.infer(node);
     }

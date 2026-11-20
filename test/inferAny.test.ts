@@ -1912,3 +1912,152 @@ module.exports = f;
   }
 });
 
+// --- Cross-file require: the requiring binding must carry the required
+// module's inferred export signatures (including implicit predicates), so a
+// guard defined in one file narrows its argument in another. ----------------
+interface ConvertedFile { readonly file: string; readonly output: string; }
+
+function convertRequireDir(files: Readonly<Record<string, string>>): {
+  outputs: Readonly<Record<string, string>>;
+  strictFor: (name: string) => ReturnType<typeof checkStrict>;
+  cleanup: () => void;
+} {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-require-'));
+  const abs = (name: string): string => path.join(directory, name);
+  for (const [name, source] of Object.entries(files)) fs.writeFileSync(abs(name), source, 'utf8');
+  const rootNames = Object.keys(files).map(abs);
+  const resolver = createUsageResolver(rootNames, guardJsOptions);
+  const outputs: Record<string, string> = {};
+  for (const name of Object.keys(files)) {
+    outputs[name] = convertSource(abs(name), files[name] ?? '', { banner: false }, resolver).output;
+  }
+  return {
+    outputs,
+    strictFor: (name) => checkStrict(abs(name.replace(/\.js$/, '.ts')), outputs[name] ?? '', { allowJs: true }),
+    cleanup: () => fs.rmSync(directory, { recursive: true, force: true }),
+  };
+}
+
+test('cross-file require: object export carries the inferred predicate and narrows the caller', () => {
+  const { outputs, strictFor, cleanup } = convertRequireDir({
+    'guard.js': `
+function isObject(v) { return v !== null && typeof v === 'object'; }
+module.exports = { isObject };
+`,
+    'app.js': `
+var guard = require('./guard');
+function throttle(options) {
+  if (guard.isObject(options)) {
+    var leading = 'leading' in options ? options.leading : false;
+    return leading;
+  }
+  return 0;
+}
+module.exports = throttle;
+`,
+  });
+  try {
+    assert.match(outputs['guard.js'] ?? '', /function isObject\(v: unknown\): v is object & \{ leading: unknown \}/);
+    assert.match(
+      outputs['app.js'] ?? '',
+      /var guard: \{ isObject: \(v: unknown\) => v is object & \{ leading: unknown \}; \} = require\('\.\/guard'\)/,
+    );
+    const strict = strictFor('app.js');
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('cross-file require: exports.x = style carries multiple predicates', () => {
+  const { outputs, strictFor, cleanup } = convertRequireDir({
+    'guards.js': `
+function isStr(v) { return typeof v === 'string'; }
+function isFn(v) { return typeof v === 'function'; }
+exports.isStr = isStr;
+exports.isFn = isFn;
+`,
+    'app.js': `
+var g = require('./guards');
+function f(a, b) {
+  if (g.isStr(a)) { return a.length; }
+  if (g.isFn(b)) { return b(); }
+  return 0;
+}
+module.exports = f;
+`,
+  });
+  try {
+    assert.match(outputs['guards.js'] ?? '', /function isStr\(v: unknown\): v is string\b/);
+    assert.match(outputs['guards.js'] ?? '', /function isFn\(v: unknown\): v is Function\b/);
+    assert.match(outputs['app.js'] ?? '', /isStr: \(v: unknown\) => v is string/);
+    assert.match(outputs['app.js'] ?? '', /isFn: \(v: unknown\) => v is Function/);
+    const strict = strictFor('app.js');
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('cross-file require: direct module.exports = guard carries the predicate', () => {
+  const { outputs, strictFor, cleanup } = convertRequireDir({
+    'guard.js': `
+function isObject(v) { return v !== null && typeof v === 'object'; }
+module.exports = isObject;
+`,
+    'app.js': `
+var isObject = require('./guard');
+function throttle(options) {
+  if (isObject(options)) {
+    var leading = 'leading' in options ? options.leading : false;
+    return leading;
+  }
+  return 0;
+}
+module.exports = throttle;
+`,
+  });
+  try {
+    assert.match(outputs['app.js'] ?? '', /var isObject: \(v: unknown\) => v is object & \{ leading: unknown \} = require/);
+    const strict = strictFor('app.js');
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('cross-file require: ESM named exports are inlined with inferred signatures', () => {
+  const { outputs, cleanup } = convertRequireDir({
+    'math.js': `
+export function double(x) { return x * 2; }
+export function greet(name) { return 'hi ' + name; }
+`,
+    'app.js': `
+var m = require('./math');
+function f() { return m.double(21); }
+module.exports = f;
+`,
+  });
+  try {
+    assert.match(outputs['app.js'] ?? '', /var m: \{[^}]*double:[^}]*greet:[^}]*\} = require\('\.\/math'\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('cross-file require: a non-relative specifier is left untouched', () => {
+  const { outputs, cleanup } = convertRequireDir({
+    'app.js': `
+var path = require('path');
+function f() { return path.join('a', 'b'); }
+module.exports = f;
+`,
+  });
+  try {
+    // Bare specifiers use the existing typeof import() path, never inlined.
+    assert.doesNotMatch(outputs['app.js'] ?? '', /var path: \{/);
+  } finally {
+    cleanup();
+  }
+});
+
