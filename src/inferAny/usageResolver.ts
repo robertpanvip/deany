@@ -2,7 +2,7 @@ import * as ts from 'typescript';
 
 import type { InferenceContext, UsageResolver } from './types.js';
 import { isArrayTypeString, isFunctionLike } from './util.js';
-import { ARRAY_BUILTIN_MEMBERS, ITERATION_METHODS } from './constants.js';
+import { ARRAY_BUILTIN_MEMBERS, ITERATION_METHODS, REDUCER_METHODS, REDUCER_SIGNATURE } from './constants.js';
 import { createContext, createTable } from './state.js';
 import { buildInferenceTable, ownerType } from './table.js';
 import { collectDeclarations } from './collect.js';
@@ -73,6 +73,41 @@ export function callbackReceiverIsTypedArray(param: ts.ParameterDeclaration, ctx
   }
   const inferred = ctx.table.declarations.get(declaration);
   return inferred !== undefined && isArrayTypeString(inferred);
+}
+
+/**
+ * True when `param` is the callback of a reduce/reduceRight call whose receiver
+ * was inferred with the generic accumulator signature. The rewritten source
+ * then gives the callback parameters contextual types from the real `init`
+ * argument, so annotating them `unknown` would override that and reintroduce
+ * TS18046. (Review round 12 / idea 2.)
+ */
+export function callbackReceiverIsGenericReducer(
+  param: ts.ParameterDeclaration,
+  ctx: InferenceContext,
+): boolean {
+  const func = param.parent;
+  if (!isFunctionLike(func) || !ts.isCallExpression(func.parent)) {
+    return false;
+  }
+  const call = func.parent;
+  if (!call.arguments.some((arg) => arg === func) || call.arguments.length < 2) {
+    return false;
+  }
+  const callee = call.expression;
+  if (!ts.isPropertyAccessExpression(callee) || !REDUCER_METHODS.has(callee.name.text)) {
+    return false;
+  }
+  let symbol = ctx.checker.getSymbolAtLocation(callee.expression);
+  if (symbol !== undefined && (symbol.flags & ts.SymbolFlags.Alias) !== 0) {
+    symbol = ctx.checker.getAliasedSymbol(symbol);
+  }
+  const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
+  if (declaration === undefined) {
+    return false;
+  }
+  const inferred = ctx.table.declarations.get(declaration);
+  return inferred !== undefined && inferred.includes(REDUCER_SIGNATURE);
 }
 
 /**
@@ -161,6 +196,9 @@ export function createUsageResolver(
         return false;
       }
       if (callbackReceiverIsTypedArray(param, ctx)) {
+        return false;
+      }
+      if (callbackReceiverIsGenericReducer(param, ctx)) {
         return false;
       }
       if (isCustomArrayMethodCallback(param, ctx)) {

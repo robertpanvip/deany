@@ -51,6 +51,8 @@ export function emptyEvidence(): Evidence {
     methodReturnTypes: new Map<string, string[]>(),
     objectLiteralInit: false,
     stringContext: false,
+    ambiguousAdd: false,
+    nameHintNumber: false,
   };
 }
 

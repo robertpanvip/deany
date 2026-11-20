@@ -180,11 +180,24 @@ function div(a, b) { return a / b; }
   assert.match(output, /function div\(a: number, b: number\): number/);
 });
 
-test('does not infer number operands from + (may be string concatenation)', () => {
-  const output = convertJs(`
+test('anchor-less + falls back to any; numeric name gives weak number params', () => {
+  // `+` may be numeric addition or string concat. With a neutral function name
+  // and no other evidence, the parameters fall back to `any` (faithful to the
+  // original implicit-any JS) so `a + b` is legal under strict — NOT `unknown`,
+  // which would be TS18046. A numeric-accumulator name (`add`) is a weak hint
+  // that makes the PARAMETERS `number`, still overridable by real evidence.
+  // The return stays `unknown`: the function's evidence cannot see a call
+  // site that later retypes the parameters to string, so claiming `number`
+  // here would cause a TS2322 regression for `add('x','y')`. (Round 12.)
+  const neutral = convertJs(`
+function combine(a, b) { return a + b; }
+`);
+  assert.match(neutral, /function combine\(a: any, b: any\): unknown/);
+
+  const named = convertJs(`
 function add(a, b) { return a + b; }
 `);
-  assert.match(output, /function add\(a: unknown, b: unknown\): unknown/);
+  assert.match(named, /function add\(a: number, b: number\): unknown/);
 });
 
 test('an opaque return branch keeps the function return unknown, not a lie', () => {

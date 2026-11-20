@@ -241,6 +241,51 @@ test('R10-3: CommonJS tsconfig drops verbatimModuleSyntax so emitted exports com
   assert.ok(result.ok, result.diagnostics.join('\n'));
 });
 
+test('R12-4: weak name hint and any fallback never outrank real evidence', () => {
+  // A numeric name only weakly suggests number; a real string call site must
+  // override it. A neutral name with anchor-less `+` falls back to `any`.
+  const overridden = convertJsWithResolver('a.js', [
+    'export function add(a, b) { return a + b; }',
+    "add('x', 'y');",
+  ].join('\n'));
+  assert.match(overridden, /function add\(a: string, b: string\)/);
+  assert.ok(checkStrict('a.ts', overridden).ok);
+
+  const anyFallback = convertJsWithResolver('a.js',
+    'export function combine(a, b) { return a + b; }');
+  assert.match(anyFallback, /function combine\(a: any, b: any\)/);
+  assert.ok(checkStrict('a.ts', anyFallback).ok);
+});
+
+test('R12-1: untyped reduce receiver gets a generic accumulator signature', () => {
+  // With no call site or JSDoc, `list.reduce((a,b)=>a+b, 0)` used to freeze the
+  // callback params at `unknown` (TS18046). The receiver now carries a generic
+  // signature `<T>(cb, init: T) => T` so TS infers T from the real `init` value
+  // — no concrete element type is guessed (review round 12 / idea 2).
+  const out = convertJsWithResolver('a.js',
+    'export function total(list) { return list.reduce((a, b) => a + b, 0); }');
+  assert.match(out, /reduce: <T>\(cb: \(a: T, b: T, i: number\) => T, init: T\) => T/);
+  assert.match(out, /list\.reduce\(\(a, b\) => a \+ b, 0\)/);
+  assert.doesNotMatch(out, /\(a: unknown, b: unknown\)/);
+  const strict = checkStrict('a.ts', out);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R12-2: generic reduce signature also works with a 3-parameter callback', () => {
+  const out = convertJsWithResolver('a.js',
+    'export function total(list) { return list.reduce((a, b, i) => a + b, 0); }');
+  assert.match(out, /list\.reduce\(\(a, b, i\) => a \+ b, 0\)/);
+  const strict = checkStrict('a.ts', out);
+  assert.ok(strict.ok, strict.diagnostics.join('\n'));
+});
+
+test('R12-3: reduceRight uses the same generic signature', () => {
+  const out = convertJsWithResolver('a.js',
+    'export function total(list) { return list.reduceRight((a, b) => a + b, 0); }');
+  assert.match(out, /reduceRight: <T>\(cb:/);
+  assert.ok(checkStrict('a.ts', out).ok);
+});
+
 test('attaches JSDoc to an exported function expression (module.exports = fn)', () => {
   const source = `
 /**

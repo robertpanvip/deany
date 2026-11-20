@@ -4,7 +4,7 @@ import type { Evidence, InferenceContext } from './types.js';
 import { controlFlowNarrowedType } from './controlFlow.js';
 import { addConstraint, addSource, addWeakSource, emptyEvidence } from './state.js';
 import { declaredTypeOf, isExportedParameter } from './publicApi.js';
-import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES } from './constants.js';
+import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, REDUCER_METHODS, REDUCER_SIGNATURE, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES, nameSuggestsNumber } from './constants.js';
 import { arrayElementTypeOf, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
 import { customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsOf } from './shape.js';
 import { arithmeticNumberType, instanceTypeOf, orderableOperandType, symbolTypeText, typePredicateOfArgument, typeText } from './typeText.js';
@@ -289,7 +289,21 @@ export function constraintsFromReference(
       const METHOD_TYPE = '(...args: unknown[]) => unknown';
       const previous = evidence.properties.get(parent.name.text);
       if (isMethodCall || previous === METHOD_TYPE) {
-        evidence.properties.set(parent.name.text, METHOD_TYPE);
+        // A reduce/reduceRight call with an initial value gets a generic
+        // accumulator signature. TS infers T from the real `init` argument, so
+        // the callback parameters are contextually typed without ever guessing
+        // a concrete element type — `list.reduce((a,b)=>a+b, 0)` becomes legal
+        // instead of TS18046. Without an initializer there is no type anchor,
+        // so keep the weak METHOD_TYPE (see probe: no-init cannot infer T).
+        const reducerWithInit =
+          isMethodCall &&
+          ts.isCallExpression(grandparent) &&
+          REDUCER_METHODS.has(parent.name.text) &&
+          grandparent.arguments.length >= 2;
+        evidence.properties.set(
+          parent.name.text,
+          reducerWithInit ? REDUCER_SIGNATURE : METHOD_TYPE,
+        );
         // Record the contextual (expected) return type of the call, so the
         // lib-unique narrowing can verify the method's signature matches the
         // builtin. `getContextualType` yields number/string for annotated returns
@@ -527,7 +541,20 @@ export function constraintsFromReference(
     ts.isBinaryExpression(parent) &&
     (parent.left === reference || parent.right === reference)
   ) {
-    addSource(evidence, arithmeticNumberType(ctx, parent));
+    const arithmeticType = arithmeticNumberType(ctx, parent);
+    // `+` with no concrete operand type: JS may add or concatenate, so no
+    // numeric source is justified. Mark the binding so that, if it ends up
+    // with no other evidence, it falls back to `any` (faithful to the original
+    // untyped JS) instead of `unknown` (which makes `a + b` a TS18046).
+    // `arithmeticNumberType` returns a type only when one side is already
+    // number, so this branch is exactly the "no anchor" case for `+`.
+    if (
+      parent.operatorToken.kind === ts.SyntaxKind.PlusToken &&
+      arithmeticType === undefined
+    ) {
+      evidence.ambiguousAdd = true;
+    }
+    addSource(evidence, arithmeticType);
     // `-`, `*`, `/`, `%`, `**` coerce both operands to number in JS and never
     // concatenate, so an operand seen here is definitely numeric. `+` is
     // excluded (it may be string concatenation), which is why it is handled
@@ -811,8 +838,38 @@ function collectedType(node: ts.Node, ctx: InferenceContext, depth: number): str
 }
 
 /** Collect type evidence for the declaration that owns an `any` annotation. */
+/**
+ * Weak name-based numeric hint. Only a FUNCTION name counts: a parameter of
+ * `add(a, b)` or the return of `sum()` inherits the hint from the enclosing
+ * function. Variable names are intentionally NOT used — an initializer, when
+ * present, is real evidence and a name alone (`const total = ...`) is too
+ * weak / misleading. Returns false unless a clear numeric-accumulator verb is
+ * found in the function name. (Review round 12 / idea 3.)
+ */
+function ownerHasNumericNameHint(owner: ts.Node): boolean {
+  let fnName: string | undefined;
+  if (isFunctionLike(owner)) {
+    const name = (owner as ts.SignatureDeclaration).name;
+    if (name !== undefined && ts.isIdentifier(name)) {
+      fnName = name.text;
+    }
+  } else if (ts.isParameter(owner) && isFunctionLike(owner.parent)) {
+    const name = (owner.parent as ts.SignatureDeclaration).name;
+    if (name !== undefined && ts.isIdentifier(name)) {
+      fnName = name.text;
+    }
+  }
+  return fnName !== undefined && nameSuggestsNumber(fnName);
+}
+
 export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0): Evidence {
   const evidence = emptyEvidence();
+
+  // Weak naming hint (lowest confidence): a numeric-accumulator function name
+  // suggests its parameters/return are numeric. Recorded as a flag and only
+  // consumed when NO real evidence exists — never outranks sources,
+  // constraints or properties. (Review round 12 / idea 3.)
+  evidence.nameHintNumber = ownerHasNumericNameHint(owner);
 
   // A sibling `.d.ts` is the authoritative contract. If this declaration is
   // covered by one, its declared type is the highest-confidence evidence and

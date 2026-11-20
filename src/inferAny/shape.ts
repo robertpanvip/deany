@@ -404,6 +404,20 @@ export function mergeEvidence(evidence: Evidence): {
     // interpolation alone — `unknown` is the honest answer.
     members = ['unknown'];
     weak = true;
+  } else if (evidence.nameHintNumber) {
+    // Weak naming hint (e.g. a parameter of `add`/`sum`/`count`). Used ONLY
+    // when no real source/constraint/property exists, and marked weak so any
+    // real evidence in a later round immediately overrides it. Checked before
+    // ambiguousAdd: a numeric-accumulator name is a more specific hint than
+    // the generic "cannot tell from `+`" fallback. (Review round 12.)
+    return { type: 'number', weak: true };
+  } else if (evidence.ambiguousAdd) {
+    // The binding was only ever used in an anchor-less `+`. JS cannot decide
+    // between numeric addition and string concat, so no type is justified;
+    // emit `any` (faithful to the original implicit-any JS) instead of
+    // `unknown`, which would make the `a + b` expression a TS18046. Marked weak
+    // so a later round's concrete evidence can still refine it. (Round 12.)
+    return { type: 'any', weak: true };
   } else if (evidence.weakSources.length > 0) {
     // Only low-confidence call-site evidence exists (S4: internal callers of
     // an exported parameter). It is deliberately NOT used to narrow the

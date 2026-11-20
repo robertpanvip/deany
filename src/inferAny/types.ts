@@ -159,6 +159,20 @@ export interface Evidence {
   objectLiteralInit: boolean;
   /** True when the binding was seen only in string-like contexts. Weak hint. */
   stringContext: boolean;
+  /**
+   * True when the binding was used as an operand of a `+` whose other side had
+   * no concrete type either. JS `+` may be numeric addition or string concat,
+   * so no numeric type is justified; with no other evidence the binding falls
+   * back to `any` (faithful to the untyped JS semantics) rather than `unknown`,
+   * which would make the expression itself a TS18046. (Review round 12 / idea 3.)
+   */
+  ambiguousAdd: boolean;
+  /**
+   * Weak naming hint that the binding is numeric (function/variable name like
+   * `add`/`sum`/`count`). Never outranks real evidence; only consulted when no
+   * source, constraint or property exists. (Review round 12 / idea 3.)
+   */
+  nameHintNumber: boolean;
 }
 
 export type MutationKind = 'collection' | 'map' | 'set';

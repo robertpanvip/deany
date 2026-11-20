@@ -16,6 +16,46 @@ export const ITERATION_METHODS = new Set<string>([
   'flatMap', 'includes', 'indexOf', 'lastIndexOf',
 ])
 
+/**
+ * Reduce-family methods. When such a method is called with an initial value on
+ * an otherwise untyped receiver, a generic accumulator signature lets TS infer
+ * the accumulator type from the initializer — instead of freezing the callback
+ * parameters at `unknown` (which makes `a + b` a TS18046). This never guesses a
+ * concrete element type: the type parameter is resolved by TS from the real
+ * `init` argument. (Review round 12 / idea 2.)
+ */
+export const REDUCER_METHODS = new Set<string>(['reduce', 'reduceRight']);
+
+/** Generic accumulator signature emitted for an untyped reduce receiver. */
+export const REDUCER_SIGNATURE = '<T>(cb: (a: T, b: T, i: number) => T, init: T) => T';
+
+/**
+ * Naming hints that, on a FUNCTION name, weakly suggest a numeric accumulator
+ * or result. Deliberately a small, unambiguous list: `add`/`sum`/`count`/...
+ * Only ever used as weak evidence (out ranked by any real source/constraint)
+ * and only when the binding has no other information. Name matching splits
+ * camelCase/snake_case so `computeTotal` and `max_value` are recognized.
+ * (Review round 12 / idea 3.)
+ */
+export const NUMERIC_NAME_HINTS: ReadonlySet<string> = new Set([
+  'add', 'sum', 'total', 'count', 'average', 'avg', 'increment', 'inc',
+  'decrement', 'dec', 'max', 'min', 'sumof', 'addup', 'accumulate',
+]);
+
+/** Split an identifier into lowercase word tokens (`computeTotal` -> [compute, total]). */
+export function nameTokens(name: string): string[] {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .map((token) => token.toLowerCase())
+    .filter((token) => token.length > 0);
+}
+
+/** True when a name weakly suggests a numeric accumulator/result. */
+export function nameSuggestsNumber(name: string): boolean {
+  return nameTokens(name).some((token) => NUMERIC_NAME_HINTS.has(token));
+}
+
 /** Standard Array members — calling one says nothing about a custom shape. */
 export const ARRAY_BUILTIN_MEMBERS = new Set<string>([
   ...ITERATION_METHODS,
