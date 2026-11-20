@@ -139,6 +139,19 @@ export function typeText(
   if (text.length === 0 || text === 'any' || text === 'unknown') {
     return resolveViaTable(ctx, node) ?? builtinCallResultFromReceiver(ctx, node);
   }
+  // A class EXPRESSION is printed by the checker as `typeof (Anonymous class)`
+  // or `typeof Named`, neither of which is a legal type annotation at the use
+  // site: an anonymous class has no type-space name (TS1003), and a named
+  // class expression's name is visible only inside its own body (TS2552).
+  // E.g. `function f(B){ return class extends B {}; }` would emit
+  // `: typeof (Anonymous class)`. Treat a class expression's own textual type
+  // as unusable and fall back to the conservative `unknown` default — a class
+  // value is always assignable to `unknown`. (A class DECLARATION or an
+  // identifier bound to one still prints a legal `typeof Foo` and is kept;
+  // only the expression node itself is filtered here.) (Review round 16.)
+  if (ts.isClassExpression(node) && text.startsWith('typeof ')) {
+    return resolveViaTable(ctx, node) ?? builtinCallResultFromReceiver(ctx, node);
+  }
   return text;
 }
 

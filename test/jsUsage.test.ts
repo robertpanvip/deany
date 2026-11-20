@@ -351,3 +351,93 @@ test('R15-6: opaque-return assertion excludes nested function returns and handle
   assert.match(mixed.output, /\): unknown/);
   assert.ok(mixed.strict.ok, mixed.strict.diagnostics.join('\n'));
 });
+
+// --- Round 16: previously-uncovered STRONG evidence -------------------------
+
+test('R16-1: transparent wrappers (! / parens) do not break structural evidence', () => {
+  // A property/call/index/assignment on a wrapped binding is real structural
+  // evidence; NonNull/Parenthesized/As wrappers are transparent for inference.
+  const prop = convertJsStrict(`function probe(v) { return v!.foo; }\n`);
+  assert.match(prop.output, /probe\(v: \{ foo: unknown; \}\)/);
+  assert.ok(prop.strict.ok, prop.strict.diagnostics.join('\n'));
+
+  const paren = convertJsStrict(`function probe(v) { return (v).foo; }\n`);
+  assert.match(paren.output, /probe\(v: \{ foo: unknown; \}\)/);
+  assert.ok(paren.strict.ok, paren.strict.diagnostics.join('\n'));
+
+  const call = convertJsStrict(`function probe(v) { return v!(); }\n`);
+  assert.match(call.output, /probe\(v: \(\.\.\.args: unknown\[\]\) => unknown\)/);
+  assert.ok(call.strict.ok, call.strict.diagnostics.join('\n'));
+
+  const chain = convertJsStrict(`function probe(v) { return v!.a.b; }\n`);
+  assert.match(chain.output, /\{ a: \{ b: unknown; \}; \}/);
+  assert.ok(chain.strict.ok, chain.strict.diagnostics.join('\n'));
+
+  // A wrapped assignment target still contributes its source value.
+  const assign = convertJsStrict(`function probe(v) { (v)! ||= 5; }\n`);
+  assert.match(assign.output, /probe\(v: number\)/);
+  assert.ok(assign.strict.ok, assign.strict.diagnostics.join('\n'));
+});
+
+test('R16-2: tagged template callee gets a callable constraint', () => {
+  const plain = convertJsStrict('function probe(tag) { return tag`hi`; }\n');
+  assert.match(plain.output, /tag: \(\.\.\.args: unknown\[\]\) => unknown/);
+  assert.ok(plain.strict.ok, plain.strict.diagnostics.join('\n'));
+
+  const interpolated = convertJsStrict('function probe(tag, v) { return tag`a${v}b`; }\n');
+  assert.match(interpolated.output, /tag: \(\.\.\.args: unknown\[\]\) => unknown/);
+  assert.ok(interpolated.strict.ok, interpolated.strict.diagnostics.join('\n'));
+});
+
+test('R16-3: object spread requires object; computed property name requires PropertyKey', () => {
+  const spread = convertJsStrict(`function probe(v) { return { ...v }; }\n`);
+  assert.match(spread.output, /probe\(v: object\)/);
+  assert.ok(spread.strict.ok, spread.strict.diagnostics.join('\n'));
+
+  const spreadFields = convertJsStrict(`function probe(v) { return { a: 1, ...v }; }\n`);
+  assert.ok(spreadFields.strict.ok, spreadFields.strict.diagnostics.join('\n'));
+
+  const computed = convertJsStrict(`function probe(v) { return { [v]: 1 }; }\n`);
+  assert.match(computed.output, /probe\(v: PropertyKey\)/);
+  assert.ok(computed.strict.ok, computed.strict.diagnostics.join('\n'));
+
+  // A real call-site value overrides the PropertyKey constraint.
+  const fromCall = convertJsStrict(`function probe(v) { return { [v]: 1 }; } probe('key');\n`);
+  assert.match(fromCall.output, /probe\(v: string\)/);
+  assert.ok(fromCall.strict.ok, fromCall.strict.diagnostics.join('\n'));
+});
+
+test('R16-4: destructuring assignment gives the source its object/iterable shape', () => {
+  const obj = convertJsStrict(`function probe(v) { let a; ({a} = v); return a; }\n`);
+  assert.match(obj.output, /probe\(v: \{ a: unknown; \}\)/);
+  assert.ok(obj.strict.ok, obj.strict.diagnostics.join('\n'));
+
+  const multi = convertJsStrict(`function probe(v) { let a, b; ({a, b} = v); return a; }\n`);
+  assert.match(multi.output, /\{ a: unknown; b: unknown; \}/);
+  assert.ok(multi.strict.ok, multi.strict.diagnostics.join('\n'));
+
+  const arr = convertJsStrict(`function probe(v) { let a; [a] = v; return a; }\n`);
+  assert.match(arr.output, /probe\(v: Iterable<unknown>\)/);
+  assert.ok(arr.strict.ok, arr.strict.diagnostics.join('\n'));
+});
+
+test('R16-5: class expressions no longer emit illegal typeof texts', () => {
+  // Anonymous / named class expressions print `typeof (Anonymous class)` /
+  // `typeof Named` from the checker — illegal as a return annotation (TS1003 /
+  // TS2552). They now fall back to `unknown`.
+  const anonExtends = convertJsStrict(`function probe(Base) { return class extends Base {}; }\n`);
+  assert.doesNotMatch(anonExtends.output, /Anonymous class|typeof Named/);
+  assert.match(anonExtends.output, /probe\(Base: new \(\.\.\.args: any\[\]\) => any\): unknown/);
+  assert.ok(anonExtends.strict.ok, anonExtends.strict.diagnostics.join('\n'));
+
+  const named = convertJsStrict(`function probe() { return class Named { m(){ return 1; } }; }\n`);
+  assert.doesNotMatch(named.output, /typeof Named/);
+  assert.ok(named.strict.ok, named.strict.diagnostics.join('\n'));
+
+  const arrow = convertJsStrict(`const probe = (Base) => class extends Base {};\n`);
+  assert.ok(arrow.strict.ok, arrow.strict.diagnostics.join('\n'));
+
+  // A named class DECLARATION still keeps its legal `typeof`-style identity.
+  const decl = convertJsStrict(`class Named { m(){ return 1; } }\n`);
+  assert.ok(decl.strict.ok, decl.strict.diagnostics.join('\n'));
+});

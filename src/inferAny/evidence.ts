@@ -156,6 +156,34 @@ function statementAlwaysTerminates(statement: ts.Statement): boolean {
   return false;
 }
 
+/**
+ * The "use node" for a reference: walk outward through transparent expression
+ * wrappers — non-null (`v!`), parentheses (`(v)`), `as`/angle-bracket
+ * assertions and `satisfies` — so that structural evidence collected at a use
+ * site also applies when the binding is wrapped. Returns the outermost wrapper,
+ * or the identifier itself when there is none. `checker`-based queries (flow
+ * narrowing, isArray guards) still use the original identifier, since those
+ * wrappers do not change the control-flow position. (Review round 16.)
+ */
+function transparentUseNode(reference: ts.Identifier): ts.Expression {
+  let current: ts.Expression = reference;
+  for (;;) {
+    const parent: ts.Node | undefined = current.parent;
+    if (
+      parent !== undefined &&
+      ((ts.isNonNullExpression(parent) && parent.expression === current) ||
+        (ts.isParenthesizedExpression(parent) && parent.expression === current) ||
+        (ts.isAsExpression(parent) && parent.expression === current) ||
+        (ts.isTypeAssertionExpression(parent) && parent.expression === current) ||
+        (ts.isSatisfiesExpression(parent) && parent.expression === current))
+    ) {
+      current = parent;
+      continue;
+    }
+    return current;
+  }
+}
+
 /** Extract constraints from one reference to the `any`-typed binding. */
 export function constraintsFromReference(
   reference: ts.Identifier,
@@ -163,7 +191,10 @@ export function constraintsFromReference(
   evidence: Evidence,
   depth = 0,
 ): void {
-  const parent = reference.parent;
+  // All structural comparisons use the wrapper-transparent use node so that
+  // `v!.foo`, `(v).foo`, `v as T` etc. are treated exactly like `v.foo`.
+  const useNode: ts.Expression = transparentUseNode(reference);
+  const parent = useNode.parent;
 
   // Control-flow narrowing: inside a guard's true branch, ask the checker for
   // the type it has already narrowed this binding to. This is direct evidence
@@ -218,9 +249,37 @@ export function constraintsFromReference(
     }
   }
 
+  // Destructuring ASSIGNMENT `({ a } = x)` / `[a, b] = x`: the RHS `x` is the
+  // source being destructured, so it must have those keys (object form) or be
+  // iterable (array form). This is the assignment mirror of the declaration
+  // form `const { a } = x` above. Without it `x` stays `unknown` and strict
+  // emits TS2339 ("Property 'a' does not exist on type 'unknown'") / TS2802.
+  // The binding tokens (`a`) are collected for *their own* owner by the scan;
+  // here we only record the shape requirement on the source `x`. (Review r16.)
   if (
     ts.isBinaryExpression(parent) &&
-    parent.left === reference &&
+    parent.right === useNode &&
+    parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  ) {
+    const target = parent.left;
+    if (ts.isObjectLiteralExpression(target)) {
+      for (const prop of target.properties) {
+        if (ts.isShorthandPropertyAssignment(prop) || ts.isPropertyAssignment(prop)) {
+          const keyNode = prop.name;
+          if (ts.isIdentifier(keyNode) || ts.isStringLiteral(keyNode) || ts.isNumericLiteral(keyNode)) {
+            evidence.properties.set(keyNode.text, 'unknown');
+          }
+        }
+      }
+      evidence.objectLiteralInit = true;
+    } else if (ts.isArrayLiteralExpression(target)) {
+      addConstraint(evidence, 'Iterable<unknown>');
+    }
+  }
+
+  if (
+    ts.isBinaryExpression(parent) &&
+    parent.left === useNode &&
     parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
   ) {
     addSource(evidence, typeText(ctx, parent.right));
@@ -230,7 +289,7 @@ export function constraintsFromReference(
   // binding receives, so it is a covariant source, just like `x = v`.
   if (
     ts.isBinaryExpression(parent) &&
-    parent.left === reference &&
+    parent.left === useNode &&
     (parent.operatorToken.kind === ts.SyntaxKind.BarBarEqualsToken ||
       parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandEqualsToken ||
       parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionEqualsToken)
@@ -242,7 +301,7 @@ export function constraintsFromReference(
   // record a callable signature so strict mode does not reject `x.for(...)`;
   // `unknown` would trigger TS18046 ("not callable"). A method signature, once
   // recorded, is never downgraded to a plain `unknown` by a later read.
-  if (ts.isPropertyAccessExpression(parent) && parent.expression === reference) {
+  if (ts.isPropertyAccessExpression(parent) && parent.expression === useNode) {
     const grandparent = parent.parent;
 
     // `o.a.b` / `o.a.b.c`: collect the full access chain so a parameter with
@@ -266,7 +325,7 @@ export function constraintsFromReference(
         chain.unshift(current.name.text);
         current = current.expression;
       }
-      if (ts.isIdentifier(current) && current === reference) {
+      if (current === useNode) {
         insertShapeChain(evidence.shapeChain, chain);
       }
     }
@@ -365,7 +424,7 @@ export function constraintsFromReference(
   // `this.field = expr` / `obj.field = expr`: the reference is the property name.
   if (
     ts.isPropertyAccessExpression(parent) &&
-    parent.name === reference &&
+    parent.name === useNode &&
     ts.isBinaryExpression(parent.parent) &&
     parent.parent.left === parent &&
     parent.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
@@ -376,17 +435,17 @@ export function constraintsFromReference(
   // `Array.isArray(x)` narrows x to an array. This is a covariant source for
   // the binding, not a normal call-argument constraint. `unknown[]` is used so
   // strict mode stays intact without inventing an element type.
-  if (ts.isCallExpression(parent) && parent.arguments[0] === reference && isArrayIsArrayCall(parent)) {
+  if (ts.isCallExpression(parent) && parent.arguments[0] === useNode && isArrayIsArrayCall(parent)) {
     addSource(evidence, 'unknown[]');
   } else if (
     ts.isCallExpression(parent) &&
-    typePredicateOfArgument(parent, reference, ctx) !== undefined
+    typePredicateOfArgument(parent, useNode, ctx) !== undefined
   ) {
     // `if (isFoo(x))` where `isFoo(v): v is T` narrows x to T. This is a real
     // control-flow type guard, so T is a covariant source for the binding.
-    addSource(evidence, typePredicateOfArgument(parent, reference, ctx));
+    addSource(evidence, typePredicateOfArgument(parent, useNode, ctx));
   } else if (ts.isCallExpression(parent)) {
-    const index = parent.arguments.indexOf(reference);
+    const index = parent.arguments.indexOf(useNode);
     if (index >= 0) {
       // Built-ins like Object.defineProperty / Reflect.set demand an object at
       // this slot even though lib.d.ts types it as `any` / a bare `T` / `{}`.
@@ -438,13 +497,39 @@ export function constraintsFromReference(
   // of `unknown` (which strict mode would reject with TS18046). This also
   // reaches callees invoked inside nested callbacks, since referencesOf walks
   // the whole program rather than a single function body.
-  if (ts.isCallExpression(parent) && parent.expression === reference) {
+  if (ts.isCallExpression(parent) && parent.expression === useNode) {
     addConstraint(evidence, '(...args: unknown[]) => unknown');
   }
 
   // `new Ctor()`: same idea, but the value must be constructable.
-  if (ts.isNewExpression(parent) && parent.expression === reference) {
+  if (ts.isNewExpression(parent) && parent.expression === useNode) {
     addConstraint(evidence, 'new (...args: unknown[]) => unknown');
+  }
+
+  // Tagged template: `` tag`hi` `` / `` tag`a${v}b` ``. The tag is invoked as
+  // a function (first argument a TemplateStringsArray), so it must be callable
+  // — the same contravariant constraint as a plain `tag()`. Without it the tag
+  // stays `unknown` and strict rejects the call with TS2349. This is genuine
+  // usage evidence, not a name guess. (Review round 16.)
+  if (ts.isTaggedTemplateExpression(parent) && parent.tag === useNode) {
+    addConstraint(evidence, '(...args: unknown[]) => unknown');
+  }
+
+  // `class X extends Base {}`: the extends expression must be a constructable
+  // base class. Without this `Base` stays `unknown` and strict emits TS2507
+  // ("Type 'unknown' is not a constructor function type"). `any` in the
+  // construct signature / instance type is deliberate and language-forced:
+  // `new (...args: unknown[]) => unknown` fails with TS2509 (an `unknown`
+  // instance cannot be extended), so the base's args/instance must stay `any`
+  // to faithfully preserve the original JS's unrestricted subclassing.
+  // (Review round 16.)
+  if (
+    ts.isExpressionWithTypeArguments(parent) &&
+    parent.expression === useNode &&
+    ts.isHeritageClause(parent.parent) &&
+    parent.parent.token === ts.SyntaxKind.ExtendsKeyword
+  ) {
+    addConstraint(evidence, 'new (...args: any[]) => any');
   }
 
   // `xs.map/forEach(it => it.a.b)`: the receiver is an array, and the property
@@ -454,7 +539,7 @@ export function constraintsFromReference(
   // (the code actually depends on those properties), not a heuristic guess.
   if (
     ts.isPropertyAccessExpression(parent) &&
-    parent.expression === reference &&
+    parent.expression === useNode &&
     ts.isCallExpression(parent.parent) &&
     parent.parent.expression === parent &&
     ITERATION_METHODS.has(parent.name.text)
@@ -478,15 +563,24 @@ export function constraintsFromReference(
     }
   }
 
+  // Object spread `{...x}` requires x to be an object in strict TypeScript —
+  // spreading a bare `unknown`/number/string is TS2698 ("Spread types may only
+  // be created from object types"). The source is a SpreadAssignment (not a
+  // SpreadElement), which is why the array/call spread rule below never saw it.
+  // Record the same contravariant `object` constraint used for Object.* slots;
+  // a concrete covariant source (call-site object) still wins. (Review r16.)
+  if (ts.isSpreadAssignment(parent) && parent.expression === useNode) {
+    addConstraint(evidence, 'object');
+  }
+
   // Spread has two distinct type requirements in TypeScript:
   //   - array/iterable spread  `[...x]`  → x only needs to be Iterable<T>
   //     (a generator or Set is equally valid — Architecture review 1.6).
   //   - call-argument spread    `f(...x)` → x must be an array/tuple type;
   //     `Iterable<T>` is NOT accepted as spread arguments (TS2556/TS2345).
-  // Object spread (`{...x}`) is excluded entirely: it accepts any value.
   if (
     ts.isSpreadElement(parent) &&
-    parent.expression === reference &&
+    parent.expression === useNode &&
     !ts.isObjectLiteralExpression(parent.parent)
   ) {
     const call = parent.parent;
@@ -509,7 +603,7 @@ export function constraintsFromReference(
   // covariant source (e.g. `number[]` from a call site) can still override it.
   if (
     ts.isElementAccessExpression(parent) &&
-    parent.expression === reference
+    parent.expression === useNode
   ) {
     addConstraint(evidence, INDEXABLE_OBJECT);
   }
@@ -520,18 +614,25 @@ export function constraintsFromReference(
   // as Record<PropertyKey, unknown>.
   if (
     ts.isElementAccessExpression(parent) &&
-    parent.argumentExpression === reference
+    parent.argumentExpression === useNode
   ) {
     addConstraint(evidence, 'PropertyKey');
   }
-  if (ts.isForInStatement(parent) && parent.expression === reference) {
+  // Computed property name `{ [v]: 1 }`: v is coerced to a PropertyKey just
+  // like an index expression. Without this it stays `unknown` and strict emits
+  // TS2464 ("computed property name must be string/number/symbol"). Same real
+  // JS-language requirement, not a name guess. (Review round 16.)
+  if (ts.isComputedPropertyName(parent) && parent.expression === useNode) {
+    addConstraint(evidence, 'PropertyKey');
+  }
+  if (ts.isForInStatement(parent) && parent.expression === useNode) {
     addConstraint(evidence, INDEXABLE_OBJECT);
   }
 
   // `x instanceof Ctor` narrows x to the constructor's instance type.
   if (
     ts.isBinaryExpression(parent) &&
-    parent.left === reference &&
+    parent.left === useNode &&
     parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword
   ) {
     addSource(evidence, instanceTypeOf(ctx, parent.right));
@@ -539,7 +640,7 @@ export function constraintsFromReference(
 
   if (
     ts.isBinaryExpression(parent) &&
-    (parent.left === reference || parent.right === reference)
+    (parent.left === useNode || parent.right === useNode)
   ) {
     const arithmeticType = arithmeticNumberType(ctx, parent);
     // `+` with no concrete operand type: JS may add or concatenate, so no
@@ -581,13 +682,13 @@ export function constraintsFromReference(
       // here instead of the generic `number | string` — otherwise `let n = 0;
       // n < x` widens x to `number | string` and the comparison itself becomes
       // illegal (TS2365).
-      const other = parent.left === reference ? parent.right : parent.left;
+      const other = parent.left === useNode ? parent.right : parent.left;
       addConstraint(evidence, orderableOperandType(ctx, other) ?? 'number | string');
     }
     // `key in x` requires x to be an object (the left side is the key).
     if (
       parent.operatorToken.kind === ts.SyntaxKind.InKeyword &&
-      parent.right === reference
+      parent.right === useNode
     ) {
       addSource(evidence, 'object');
     }
@@ -612,15 +713,15 @@ export function constraintsFromReference(
   // recorded as a weak hint, consumed only as a last resort in mergeEvidence:
   // real sources (`x = 1`, `x + 1`, call-site arguments) always win and are
   // never widened into `string | number`.
-  if (ts.isTemplateSpan(parent) && parent.expression === reference) {
+  if (ts.isTemplateSpan(parent) && parent.expression === useNode) {
     evidence.stringContext = true;
   }
   if (
     ts.isBinaryExpression(parent) &&
-    (parent.left === reference || parent.right === reference)
+    (parent.left === useNode || parent.right === useNode)
   ) {
     const operator = parent.operatorToken.kind;
-    const other = parent.left === reference ? parent.right : parent.left;
+    const other = parent.left === useNode ? parent.right : parent.left;
     const stringOperand =
       ts.isStringLiteral(other) ||
       ts.isNoSubstitutionTemplateLiteral(other) ||
@@ -655,7 +756,7 @@ export function constraintsFromReference(
   // The element match uses SYMBOL IDENTITY, not the binding's spelling: a nested
   // same-named local (`() => { const v = 1; t += v; }`) must not be mistaken for
   // the loop variable and pollute the element type. (Architecture review 1.4.)
-  if (ts.isForOfStatement(parent) && parent.expression === reference) {
+  if (ts.isForOfStatement(parent) && parent.expression === useNode) {
     let elementType = 'unknown';
     const initializer = parent.initializer;
     if (ts.isVariableDeclarationList(initializer) && initializer.declarations.length > 0) {
@@ -738,7 +839,7 @@ export function constraintsFromReference(
   // -> x has those properties (a synthesized object shape, as a weak source).
   if (
     ts.isVariableDeclaration(parent) &&
-    parent.initializer === reference &&
+    parent.initializer === useNode &&
     ts.isArrayBindingPattern(parent.name)
   ) {
     // Array destructuring requires an Iterable, not an Array (a Set or a
@@ -747,7 +848,7 @@ export function constraintsFromReference(
   }
   if (
     ts.isVariableDeclaration(parent) &&
-    parent.initializer === reference &&
+    parent.initializer === useNode &&
     ts.isObjectBindingPattern(parent.name)
   ) {
     for (const element of parent.name.elements) {
@@ -768,7 +869,7 @@ export function constraintsFromReference(
   // and an `any`/`unknown` annotation is disregarded as information-free.
   if (
     ts.isVariableDeclaration(parent) &&
-    parent.initializer === reference &&
+    parent.initializer === useNode &&
     parent.type !== undefined
   ) {
     const declared = typeText(ctx, parent.type);
@@ -790,7 +891,7 @@ export function constraintsFromReference(
   // value for x (a common "default value" idiom, so x likely shares it).
   if (
     ts.isBinaryExpression(parent) &&
-    parent.left === reference &&
+    parent.left === useNode &&
     (parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
       parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
   ) {
@@ -799,9 +900,9 @@ export function constraintsFromReference(
 
   // `cond ? x : other` -> the other branch's type is a possible value for x.
   if (ts.isConditionalExpression(parent)) {
-    if (parent.whenTrue === reference) {
+    if (parent.whenTrue === useNode) {
       addSource(evidence, typeText(ctx, parent.whenFalse));
-    } else if (parent.whenFalse === reference) {
+    } else if (parent.whenFalse === useNode) {
       addSource(evidence, typeText(ctx, parent.whenTrue));
     }
   }
