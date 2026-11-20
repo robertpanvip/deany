@@ -41,14 +41,25 @@ export function buildInferenceTable(owners: readonly ts.Node[], ctx: InferenceCo
       const current = ownerType(ctx.table, owner);
       const wasWeak = ctx.table.weakOwners.has(owner);
       // Strongly inferred owners are fixed. Weak ones stay open to refinement.
-      if (current !== undefined && !wasWeak) {
+      // Exception: a *bare* `unknown` result means at least one opaque return
+      // (or initializer) could not be resolved yet, usually because it depends
+      // on another owner that has not been inferred in this fixed-point pass.
+      // Freezing it as strong would strand it at `unknown` forever even after
+      // that dependency settles to a concrete type. Keep such results open so
+      // later rounds can refine them. A genuinely unresolvable `unknown` simply
+      // re-merges to `unknown`, so convergence is unaffected.
+      const currentIsBareUnknown = current === 'unknown';
+      if (current !== undefined && !wasWeak && !currentIsBareUnknown) {
         continue;
       }
       const merged = mergeEvidence(collectEvidence(owner, ctx));
       if (merged.type === undefined) {
         continue;
       }
-      const isWeak = merged.weak === true;
+      // Treat a bare-`unknown` merge as weak so it is revisited next round once
+      // its dependencies may have concrete types. Concrete merges keep their
+      // declared strength and are frozen as before.
+      const isWeak = merged.weak === true || merged.type === 'unknown';
       const sameType = current === merged.type;
       if (sameType && isWeak === wasWeak) {
         continue;

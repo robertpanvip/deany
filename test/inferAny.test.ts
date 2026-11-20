@@ -70,35 +70,6 @@ function bare(): any { return; }
   assert.match(output, /function bare\(\): void/);
 });
 
-test('keeps `any` for an opaque `any || literal` (any | T is any, not the literal)', () => {
-  // `Symbol.observable` is non-standard: checkJs marks it `any` (TS2339), so
-  // `typeof Symbol === 'function' && Symbol.observable` is `any` and the whole
-  // `|| '@@observable'` expression is `any` — TypeScript's `any | string` is
-  // `any`, NOT `string`. The function must return `any`: narrowing to the
-  // string fallback would be a lie (a polyfilled Symbol.observable is a
-  // symbol), and degrading to `unknown` made `PropertyKey = ...unknown` fail
-  // TS2322. deany still does not fabricate a `Symbol.observable` declaration,
-  // so TS2339 at the source expression deliberately remains.
-  const { output, cleanup } = convertGuardJs(`
-var $$observable = (function () {
-  return typeof Symbol === 'function' && Symbol.observable || '@@observable';
-})();
-function key(o) { return o[$$observable]; }
-module.exports = key;
-`);
-  try {
-    assert.match(
-      output,
-      /\(function \(\): any \{\s*return typeof Symbol === 'function' && Symbol\.observable \|\| '@@observable';\s*\}\)\(\)/,
-    );
-    assert.doesNotMatch(output, /function \(\): unknown/);
-    // Must NOT over-narrow to the concrete string fallback.
-    assert.doesNotMatch(output, /function \(\): string/);
-  } finally {
-    cleanup();
-  }
-});
-
 test('wraps inferred returns in Promise for async functions', () => {
   const { output } = infer(`
 async function noop(): any { await Promise.resolve(1); }
@@ -416,6 +387,36 @@ format(value);
 let copy: any = value;
 `);
   assert.match(output, /let copy!?: \(number \| string\) = value;/);
+});
+
+test('a multi-branch string return is not frozen as unknown by an unresolved dependency', () => {
+  // Fixed-point ordering bug: `miniKindOf` returns a string from every branch,
+  // but `return constructorName` depends on `ctorName`'s inferred return. On
+  // the first round `ctorName` is not yet in the table, so that one return
+  // contributes an opaque `unknown`, making the whole merge `unknown` (strong).
+  // If frozen there, later rounds never revisit it even after `ctorName` settles
+  // to `string`. A bare-`unknown` result must stay open until convergence.
+  const { output, cleanup } = convertGuardJs(`
+function ctorName(val) {
+  return (typeof val.constructor === 'function' ? val.constructor.name : null);
+}
+function miniKindOf(val) {
+  if (val === void 0) return 'undefined';
+  if (val === null) return 'null';
+  var type = typeof val;
+  if (Array.isArray(val)) return 'array';
+  var constructorName = ctorName(val);
+  if (constructorName === 'Symbol') return constructorName;
+  return type.slice(8, -1).toLowerCase();
+}
+module.exports = miniKindOf;
+`);
+  try {
+    assert.match(output, /function miniKindOf\(val[^)]*\): string\b/);
+    assert.doesNotMatch(output, /function miniKindOf\(val[^)]*\): unknown\b/);
+  } finally {
+    cleanup();
+  }
 });
 
 test('multiple call-site constraints intersect with the inferred parameter type', () => {

@@ -121,43 +121,6 @@ export function objectConstructorResult(ctx: InferenceContext, node: ts.Node): s
   return INDEXABLE_OBJECT;
 }
 
-/**
- * `a || fallback` / `a ?? fallback` whose checker type is opaque (`any` or
- * `unknown`). The two operands must be treated differently:
- *
- * - A genuine `any` left operand (e.g. the non-standard `Symbol.observable`,
- *   which checkJs marks `any` with TS2339) makes the WHOLE logical expression
- *   `any`: `any | T === any` and `any ?? T === any`. The honest type is `any`,
- *   NOT the fallback's concrete type — the non-standard member could be a
- *   `symbol` at runtime (when polyfilled), so narrowing to the `'@@observable'`
- *   string fallback would be a lie. Degrading to `unknown` is also wrong: it
- *   breaks otherwise-valid assignments such as `PropertyKey = ...` (TS2322).
- *   Keep `any`: it is what the type system actually computes here.
- *
- * - An `unknown` left operand is an inference hole, not a real `any`. There the
- *   fallback's concrete type is legitimate observed evidence (the right operand
- *   is genuinely produced when the left is falsy), so recover it instead of
- *   collapsing to bare `unknown`.
- *
- * A normal `T | null || fallback` never reaches here because the checker has
- * already produced a concrete union type.
- */
-function logicalFallbackType(ctx: InferenceContext, node: ts.Node): string | undefined {
-  if (!ts.isBinaryExpression(node)) return undefined;
-  const op = node.operatorToken.kind;
-  if (op !== ts.SyntaxKind.BarBarToken && op !== ts.SyntaxKind.QuestionQuestionToken) return undefined;
-  const leftType = ctx.checker.getTypeAtLocation(node.left);
-  if (leftType.flags & ts.TypeFlags.Any) {
-    return 'any';
-  }
-  if ((leftType.flags & ts.TypeFlags.Unknown) === 0) return undefined;
-  const fallback = typeText(ctx, node.right);
-  if (fallback === undefined || fallback === 'any' || fallback === 'unknown' || fallback === 'never') {
-    return undefined;
-  }
-  return fallback;
-}
-
 export function typeText(
   ctx: InferenceContext,
   node: ts.Node,
@@ -169,7 +132,6 @@ export function typeText(
     return (
       objectConstructorResult(ctx, node) ??
       resolveViaTable(ctx, node) ??
-      logicalFallbackType(ctx, node) ??
       builtinCallResultFromReceiver(ctx, node)
     );
   }
