@@ -183,6 +183,13 @@ export interface Evidence {
    * (Review round 13.)
    */
   returnsAddExpression: boolean;
+  /**
+   * Weak type hint derived from a VARIABLE name with no initializer (e.g.
+   * `let names;` -> `unknown[]`, `let isReady;` -> `boolean`). Lowest
+   * confidence: only consulted when no real evidence exists. Distinct from
+   * `nameHintNumber` which is a FUNCTION-name -> parameter hint. (Round 14.)
+   */
+  nameHintType: string | undefined;
 }
 
 export type MutationKind = 'collection' | 'map' | 'set';

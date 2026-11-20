@@ -9,6 +9,10 @@ import { checkStrict } from '../src/check.js';
 import { buildInferenceTable } from '../src/inferAny/table.js';
 import { createContext, createTable, MAX_FIXED_POINT_ROUNDS } from '../src/inferAny/state.js';
 import { collectAnyOwners } from '../src/inferAny/collect.js';
+import { collectDeclarations } from '../src/inferAny/collect.js';
+import { collectEvidence } from '../src/inferAny/evidence.js';
+import { mergeEvidence } from '../src/inferAny/shape.js';
+import { variableNameSuggestsType } from '../src/inferAny/constants.js';
 
 const compilerOptions: ts.CompilerOptions = {
   strict: true,
@@ -1594,6 +1598,74 @@ test('R5-2: a sibling d.ts variable contract does not leak onto a same-named loc
     assert.match(out, /const config: \{ local\?: number; \} = \{\};/); // local inferred from assignment
     const strict = checkStrict(api, out);
     assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('R14-1: variable-name hints propose a weak type only with no real evidence', () => {
+  // A `let`/`const` without an initializer and no usage evidence may take a
+  // low-confidence type from its name. Real evidence (initializer, assignment,
+  // JSDoc, property access) always outranks it. Function returns are NEVER
+  // typed from names (TS2322, round 12). (Review round 14.)
+  assert.equal(variableNameSuggestsType('names'), 'unknown[]');
+  assert.equal(variableNameSuggestsType('items'), 'unknown[]');
+  assert.equal(variableNameSuggestsType('text'), 'string');
+  assert.equal(variableNameSuggestsType('userName'), 'string');
+  assert.equal(variableNameSuggestsType('isReady'), 'boolean');
+  assert.equal(variableNameSuggestsType('isValid'), 'boolean');
+  assert.equal(variableNameSuggestsType('count'), 'number');
+  assert.equal(variableNameSuggestsType('data'), undefined);
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r14-namehint-'));
+  const file = path.join(directory, 'case.js');
+  fs.writeFileSync(file,
+    'export function f(){ let names; let isReady; let text; let count; let data; }\n', 'utf8');
+  try {
+    const program = ts.createProgram([file], { ...compilerOptions, allowJs: true, checkJs: true });
+    const ctx = createContext(program.getTypeChecker(), program, createTable());
+    const byName = new Map<string, { hint?: string; merged?: string }>();
+    for (const owner of collectDeclarations(program)) {
+      if (ts.isVariableDeclaration(owner) && ts.isIdentifier(owner.name)) {
+        const evidence = collectEvidence(owner, ctx);
+        const merged = mergeEvidence(evidence);
+        byName.set(owner.name.text, { hint: evidence.nameHintType, merged: merged.type });
+      }
+    }
+    assert.equal(byName.get('names')?.hint, 'unknown[]');
+    assert.equal(byName.get('names')?.merged, 'unknown[]');
+    assert.equal(byName.get('isReady')?.hint, 'boolean');
+    assert.equal(byName.get('isReady')?.merged, 'boolean');
+    assert.equal(byName.get('text')?.merged, 'string');
+    assert.equal(byName.get('count')?.merged, 'number');
+    assert.equal(byName.get('data')?.hint, undefined);
+    assert.equal(byName.get('data')?.merged, undefined);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('R14-2: real evidence overrides a variable-name hint', () => {
+  // JSDoc @type, an initializer, or an assignment are all stronger than the
+  // name. The hint must never narrow a binding that has real evidence.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'r14-override-'));
+  const file = path.join(directory, 'case.js');
+  fs.writeFileSync(file,
+    'export function f(){ let text; text = 42; const count = "x"; }\n', 'utf8');
+  try {
+    const program = ts.createProgram([file], { ...compilerOptions, allowJs: true, checkJs: true });
+    const ctx = createContext(program.getTypeChecker(), program, createTable());
+    for (const owner of collectDeclarations(program)) {
+      if (!ts.isVariableDeclaration(owner) || !ts.isIdentifier(owner.name)) continue;
+      const merged = mergeEvidence(collectEvidence(owner, ctx));
+      if (owner.name.text === 'text') {
+        // assignment of 42 wins over the `string` name hint
+        assert.equal(merged.type, 'number');
+      } else if (owner.name.text === 'count') {
+        // initializer "x" wins over the `number` name hint
+        assert.equal(merged.type, 'string');
+      }
+    }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

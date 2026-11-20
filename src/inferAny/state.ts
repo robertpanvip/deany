@@ -54,6 +54,7 @@ export function emptyEvidence(): Evidence {
     ambiguousAdd: false,
     nameHintNumber: false,
     returnsAddExpression: false,
+    nameHintType: undefined,
   };
 }
 

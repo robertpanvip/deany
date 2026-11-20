@@ -411,6 +411,12 @@ export function mergeEvidence(evidence: Evidence): {
     // ambiguousAdd: a numeric-accumulator name is a more specific hint than
     // the generic "cannot tell from `+`" fallback. (Review round 12.)
     return { type: 'number', weak: true };
+  } else if (evidence.nameHintType !== undefined) {
+    // Weak variable-name hint (`let names;` -> `unknown[]`, `let isReady;` ->
+    // `boolean`). Only reached with NO real source/constraint/property and no
+    // function-name number hint; marked weak so any real evidence in a later
+    // round immediately overrides it. Never outranks real data. (Round 14.)
+    return { type: evidence.nameHintType, weak: true };
   } else if (evidence.ambiguousAdd) {
     // The binding was only ever used in an anchor-less `+`. JS cannot decide
     // between numeric addition and string concat, so no type is justified;

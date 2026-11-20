@@ -56,6 +56,46 @@ export function nameSuggestsNumber(name: string): boolean {
   return nameTokens(name).some((token) => NUMERIC_NAME_HINTS.has(token));
 }
 
+/**
+ * Weak variable-name hints grouped by the type they suggest. Consumed ONLY for
+ * a variable declaration with no initializer and no other usage evidence — a
+ * name alone is the lowest-confidence signal and never outranks real evidence.
+ * Deliberately small, unambiguous lists. (Review round 14.)
+ */
+const VARIABLE_NAME_HINTS: ReadonlyArray<{ type: string; tokens: ReadonlySet<string> }> = [
+  {
+    type: 'number',
+    tokens: new Set(['count', 'total', 'sum', 'index', 'idx', 'length', 'size', 'amount', 'price', 'score', 'num', 'number']),
+  },
+  {
+    type: 'string',
+    tokens: new Set(['name', 'text', 'title', 'url', 'path', 'message', 'label', 'description', 'content', 'str']),
+  },
+  {
+    type: 'boolean',
+    tokens: new Set(['ready', 'enabled', 'disabled', 'valid', 'visible', 'flag', 'ok', 'success', 'found', 'empty']),
+  },
+  {
+    type: 'unknown[]',
+    tokens: new Set(['list', 'items', 'values', 'entries', 'collection', 'results', 'records', 'names', 'keys']),
+  },
+];
+
+/**
+ * Weak type hint from a VARIABLE name (`let names;` -> `unknown[]`),
+ * or `undefined` when the name gives no clear signal. Predicate prefixes
+ * (`is`/`has`/`can`/`should`/`was`) make a boolean hint even for `isReady`.
+ */
+export function variableNameSuggestsType(name: string): string | undefined {
+  const tokens = nameTokens(name);
+  if (tokens.length === 0) return undefined;
+  if (tokens[0] !== undefined && ['is', 'has', 'can', 'should', 'was', 'will'].includes(tokens[0])) return 'boolean';
+  for (const group of VARIABLE_NAME_HINTS) {
+    if (tokens.some((token) => group.tokens.has(token))) return group.type;
+  }
+  return undefined;
+}
+
 /** Standard Array members — calling one says nothing about a custom shape. */
 export const ARRAY_BUILTIN_MEMBERS = new Set<string>([
   ...ITERATION_METHODS,

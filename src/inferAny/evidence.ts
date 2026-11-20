@@ -4,7 +4,7 @@ import type { Evidence, InferenceContext } from './types.js';
 import { controlFlowNarrowedType } from './controlFlow.js';
 import { addConstraint, addSource, addWeakSource, emptyEvidence } from './state.js';
 import { declaredTypeOf, isExportedParameter } from './publicApi.js';
-import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, REDUCER_METHODS, REDUCER_SIGNATURE, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES, nameSuggestsNumber } from './constants.js';
+import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, REDUCER_METHODS, REDUCER_SIGNATURE, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES, nameSuggestsNumber, variableNameSuggestsType } from './constants.js';
 import { arrayElementTypeOf, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
 import { customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsOf } from './shape.js';
 import { arithmeticNumberType, instanceTypeOf, orderableOperandType, symbolTypeText, typePredicateOfArgument, typeText } from './typeText.js';
@@ -870,6 +870,19 @@ export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0
   // consumed when NO real evidence exists — never outranks sources,
   // constraints or properties. (Review round 12 / idea 3.)
   evidence.nameHintNumber = ownerHasNumericNameHint(owner);
+
+  // Weak variable-name hint: a variable with NO initializer and no other name
+  // evidence may get a low-confidence type from its name (`let names;` ->
+  // `unknown[]`). Variables WITH an initializer are left alone — the
+  // initializer is real evidence and will populate `sources`. The hint is only
+  // consumed when no real evidence exists, so it never overrides real data.
+  // (Review round 14.)
+  if (ts.isVariableDeclaration(owner) && owner.initializer === undefined) {
+    const varName = ts.isIdentifier(owner.name) ? owner.name.text : undefined;
+    if (varName !== undefined) {
+      evidence.nameHintType = variableNameSuggestsType(varName);
+    }
+  }
 
   // A sibling `.d.ts` is the authoritative contract. If this declaration is
   // covered by one, its declared type is the highest-confidence evidence and
