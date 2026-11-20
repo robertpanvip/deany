@@ -61,6 +61,16 @@ export interface InferenceTable {
   /** Owners inferred only from weak (property-shape) evidence; re-evaluated. */
   readonly weakOwners: Set<ts.Node>;
   /**
+   * Dependency graph discovered during evidence collection: for each owner,
+   * the set of other owners whose inferred type its evidence read from the
+   * table (via `resolveViaTable` / call-site parameter reads). An owner may only
+   * be frozen as strong evidence once every dependency has settled; otherwise
+   * an early strong result (e.g. an opaque `unknown` while a callee is not yet
+   * inferred) would be permanent and wrong. Keyed so cycles are harmless — a
+   * cycle simply keeps its members re-evaluating until their values stabilise.
+   */
+  readonly dependencies: Map<ts.Node, Set<ts.Node>>;
+  /**
    * Number of fixed-point rounds actually executed, and whether convergence
    * was reached before the cap. Exposed so callers can detect a non-converged
    * long dependency chain instead of silently returning a partial table.
@@ -86,6 +96,19 @@ export interface InferenceContext {
   readonly evidenceMemo: Map<ts.Node, { round: number; type?: string }>;
   /** Current fixed-point round, used to invalidate the per-round memo. */
   round: number;
+  /**
+   * The top-level owner whose evidence is currently being collected. Table
+   * reads during nested/recursive collection are attributed to this owner, so
+   * dependency edges always point from the owner being inferred to the owners
+   * it actually consulted — never to an intermediate recursive node.
+   */
+  activeOwner?: ts.Node;
+  /**
+   * Scratch set for the dependency edges discovered while collecting the
+   * current owner's evidence. `buildInferenceTable` swaps this in before each
+   * collection and stores the result into `table.dependencies`.
+   */
+  activeDeps?: Set<ts.Node>;
   /**
    * Authoritative sibling `.d.ts` contracts, keyed by the source file path.
    * When a declaration has an entry here, its type outranks all usage

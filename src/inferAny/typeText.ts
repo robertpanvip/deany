@@ -4,6 +4,17 @@ import type { InferenceContext } from './types.js';
 import { ARRAY_SCALAR_RETURN, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, STRING_ARRAY_SHARED_METHODS, TYPE_FORMAT, UNIQUE_BUILTIN_METHODS, VAGUE_RETURN_TYPES } from './constants.js';
 import { isArrayTypeString, sanitizeInstanceType, splitTypeArguments, widenedTypeText } from './util.js';
 
+/** Record that the owner currently being inferred consulted `declaration`'s
+ * inferred type. This builds the dependency graph used by the fixed-point
+ * solver to decide when an owner's evidence is stable enough to freeze. Reads
+ * outside evidence collection (`activeOwner` unset) are not dependencies of
+ * any owner and are ignored. */
+export function noteDependency(ctx: InferenceContext, declaration: ts.Node): void {
+  const owner = ctx.activeOwner;
+  if (owner === undefined || declaration === owner) return;
+  ctx.activeDeps?.add(declaration);
+}
+
 /** Table lookup for a node whose checker type is `any`. This is the positive
  * propagation edge: a call resolves to a callee's inferred return type, and an
  * identifier resolves to a binding's inferred type. */
@@ -11,6 +22,7 @@ export function resolveViaTable(ctx: InferenceContext, node: ts.Node): string | 
   if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
     const declaration = ctx.checker.getResolvedSignature(node)?.declaration;
     if (declaration !== undefined) {
+      noteDependency(ctx, declaration);
       return ctx.table.returns.get(declaration);
     }
     return undefined;
@@ -25,6 +37,7 @@ export function resolveViaTable(ctx: InferenceContext, node: ts.Node): string | 
     }
     const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];
     if (declaration !== undefined) {
+      noteDependency(ctx, declaration);
       return ctx.table.declarations.get(declaration);
     }
   }

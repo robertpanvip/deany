@@ -7,7 +7,7 @@ import { declaredTypeOf, isExportedParameter } from './publicApi.js';
 import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, REDUCER_METHODS, REDUCER_SIGNATURE, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES, functionNameSuggestsReturnType, nameSuggestsNumber, variableNameSuggestsType } from './constants.js';
 import { arrayElementTypeOf, functionLikeName, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, iterableArgumentConstraint, iterableConstructorConstraint, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
 import { callResultShape, customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsWithCallsOf, renderShapeNode } from './shape.js';
-import { arithmeticNumberType, instanceTypeOf, orderableOperandType, symbolTypeText, typePredicateOfArgument, typeText } from './typeText.js';
+import { arithmeticNumberType, instanceTypeOf, noteDependency, orderableOperandType, symbolTypeText, typePredicateOfArgument, typeText } from './typeText.js';
 import { collectMutationEvidence, containerInstantiationFromMutations } from './mutation.js';
 import { callsOf, referencesOf } from './collect.js';
 
@@ -599,6 +599,7 @@ export function constraintsFromReference(
               paramText = widenedTypeText(ctx.checker, elementType, parent);
             }
           }
+          if (parameterDecl !== undefined) noteDependency(ctx, parameterDecl);
           const inferred =
             parameterDecl === undefined ? undefined : ctx.table.declarations.get(parameterDecl);
           addConstraint(evidence, inferred ?? paramText ?? 'unknown');
@@ -1141,6 +1142,10 @@ function ownerHasNumericNameHint(owner: ts.Node): boolean {
 }
 
 export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0): Evidence {
+  // Attribute every table read in this collection (including recursive ones)
+  // to the top-level owner being inferred, so dependency edges point at the
+  // real owner rather than an intermediate recursive node.
+  if (depth === 0) ctx.activeOwner = owner;
   const evidence = emptyEvidence();
 
   // Weak naming hints (lowest confidence), consumed only when NO real evidence

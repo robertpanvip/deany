@@ -17,6 +17,7 @@ export function createTable(): InferenceTable {
     declarations: new Map(),
     returns: new Map(),
     weakOwners: new Set(),
+    dependencies: new Map(),
     diagnostics: { rounds: 0, converged: true, maxRounds: MAX_FIXED_POINT_ROUNDS },
   };
 }

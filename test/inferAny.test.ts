@@ -980,6 +980,45 @@ take(c);
   }
 });
 
+test('fixed point tracks dependency edges so a strong-but-unstable owner is revisited', () => {
+  // Evidence strength and evidence stability are distinct. A function whose
+  // every return feeds a value from another declaration is *strong* evidence
+  // (concrete values, not a synthesized shape) yet *unstable* until that
+  // declaration is inferred. The solver must record the dependency edge and
+  // re-collect the function when the dependency changes, instead of freezing
+  // an early premature value.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'dep-track-'));
+  const file = path.join(directory, 'case.ts');
+  fs.writeFileSync(
+    file,
+    `
+function pick(v: any) { return v; }
+var source: any = 'hello';
+function forward() { return pick(source); }
+`,
+    'utf8',
+  );
+  try {
+    const program = ts.createProgram([file], compilerOptions);
+    const ctx = createContext(program.getTypeChecker(), program, createTable());
+    const table = buildInferenceTable(collectDeclarations(program), ctx);
+    assert.equal(table.diagnostics.converged, true);
+    // `forward`'s body reads `pick`'s return and `source`'s type; at least the
+    // call-site dependency must be recorded for the stability check to work.
+    let forward: ts.FunctionDeclaration | undefined;
+    const visit = (n: ts.Node): void => {
+      if (ts.isFunctionDeclaration(n) && n.name?.text === 'forward') forward = n;
+      ts.forEachChild(n, visit);
+    };
+    visit(program.getSourceFile(file)!);
+    assert.ok(forward !== undefined);
+    const deps = table.dependencies.get(forward);
+    assert.ok(deps !== undefined && deps.size > 0, 'forward must record dependency edges');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('fixed-point non-convergence is exposed on InferFileResult (arch P1)', () => {
   // A long reverse dependency chain propagates one hop per round; with more
   // hops than MAX_FIXED_POINT_ROUNDS the table cannot settle. The status MUST
