@@ -2130,3 +2130,81 @@ module.exports = f;
   }
 });
 
+
+test('type-classifier params (only probed, never consumed) stay unknown', () => {
+  // A classifier reports WHAT TYPE its argument is (miniKindOf/kindOf in redux)
+  // rather than operating on the value. Its parameter legitimately accepts any
+  // value, so narrowing it from its own probes (Array.isArray -> unknown[],
+  // isDate -> Date, ...) or from call sites produced a misleading union. The
+  // full semantic rule: a bare parameter whose every in-body reference is a
+  // type probe (>=2 distinct probe kinds) and which is never read as a value
+  // must stay `unknown`.
+  const { output, cleanup } = convertGuardJs(`
+function isError(val) {
+  return val instanceof Error || typeof val.message === 'string' && val.constructor;
+}
+function ctorName(val) {
+  return (typeof val.constructor === 'function' ? val.constructor.name : null);
+}
+function miniKindOf(val) {
+  if (val === void 0) return 'undefined';
+  if (val === null) return 'null';
+  var type = typeof val;
+  switch (type) {
+    case 'boolean': case 'string': case 'number': case 'symbol': case 'function': return type;
+  }
+  if (Array.isArray(val)) return 'array';
+  if (isError(val)) return 'error';
+  var constructorName = ctorName(val);
+  switch (constructorName) {
+    case 'Symbol': case 'Promise': return constructorName;
+  }
+  return type.slice(8, -1).toLowerCase();
+}
+function kindOf(val) {
+  var typeOfVal = typeof val;
+  { typeOfVal = miniKindOf(val); }
+  return typeOfVal;
+}
+module.exports = { miniKindOf, kindOf };
+`);
+  try {
+    assert.match(output, /function miniKindOf\(val: unknown\): string\b/);
+    assert.match(output, /function kindOf\(val: unknown\): string\b/);
+    assert.doesNotMatch(output, /function miniKindOf\(val: unknown\[\]/);
+    assert.doesNotMatch(output, /function kindOf\(val: unknown\[\]/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('type-classifier rule does not fire when the parameter is read as a value', () => {
+  // `x.size === 0` reads a property of x — that is a value use, so x must keep
+  // its instanceof-narrowed type (Map/Set), not collapse to `unknown`.
+  const { output } = infer(`
+function isEmpty(x: any) {
+  if (x instanceof Map) return x.size === 0;
+  if (x instanceof Set) return x.size === 0;
+  return false;
+}
+`);
+  assert.match(output, /x instanceof Map/);
+  assert.match(output, /Map<unknown, unknown>/);
+});
+
+test('type-classifier rule does not fire on a function that reads a property of its param', () => {
+  // `has(key)` reads `key._reactInternals`; its param must keep the property
+  // shape, otherwise strict mode raises TS18046 on the property access.
+  const { output, file, cleanup } = convertGuardJs(`
+function has(key) { return key._reactInternals !== undefined; }
+module.exports = has;
+`);
+  try {
+    assert.doesNotMatch(output, /function has\(key: unknown\)/);
+    assert.match(output, /_reactInternals/);
+    const strict = checkStrict(file, output, { allowJs: true });
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    cleanup();
+  }
+});
