@@ -154,6 +154,15 @@ export interface ShapeNode {
    * with a callable `bar`). (Review round 17.)
    */
   callable?: boolean;
+  /**
+   * A lib-fixed scalar type for a terminal node that is a known built-in
+   * member of an inherited prototype object. E.g. reading `obj.constructor.name`
+   * dereferences `Function.prototype.name`, whose lib type is `string` — not an
+   * opaque `unknown`. Set only for a leaf reached through a recognized built-in
+   * chain; a node with its own accessed children keeps its synthesized shape.
+   * (v0.1.41.)
+   */
+  leafType?: string;
 }
 
 /**

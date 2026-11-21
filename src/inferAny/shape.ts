@@ -2,7 +2,7 @@ import * as ts from 'typescript';
 import { hasTopLevelArrow } from '../normalize.js';
 
 import type { Evidence, InferenceContext, ShapeNode } from './types.js';
-import { BUILTIN_MEMBERS_BY_SOURCE, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES } from './constants.js';
+import { BUILTIN_MEMBERS_BY_SOURCE, BUILTIN_MEMBER_CHAIN_LEAF_TYPES, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES } from './constants.js';
 import { addStringIndexSignature, isArrayTypeString, splitTopLevelUnion } from './util.js';
 import { uniqueBuiltinReceiverType } from './typeText.js';
 
@@ -19,6 +19,9 @@ export function insertShapeChain(
       child = { children: new Map<string, ShapeNode>() };
       node.children.set(key, child);
     }
+    // This node now has (at least) one child, so it is an intermediate node
+    // and can no longer carry a leaf type from an earlier, shorter chain.
+    node.leafType = undefined;
     node = child;
   }
   // A chain observed as a call (`x.foo()`) marks its terminal node callable.
@@ -36,6 +39,16 @@ export function insertShapeChain(
       first.optional = true;
     }
   }
+  // A terminal member of a well-known inherited built-in chain has a lib-fixed
+  // scalar type: `val.constructor.name` -> string, `.constructor.length` ->
+  // number. Only mark a genuine leaf — a node further dereferenced later
+  // (`constructor.name.x`) keeps its synthesized child shape instead.
+  if (chain.length > 0) {
+    const leafType = BUILTIN_MEMBER_CHAIN_LEAF_TYPES.get(chain.join('.'));
+    if (leafType !== undefined && node.children.size === 0 && !callable) {
+      node.leafType = leafType;
+    }
+  }
 }
 
 export function renderShapeNode(node: ShapeNode): string {
@@ -49,7 +62,9 @@ export function renderShapeNode(node: ShapeNode): string {
       const optional = child.optional === true ? '?' : '';
       return `${name}${optional}: ${renderShapeNode(child)};`;
     });
-  const value = fields.length === 0 ? 'unknown' : `{ ${fields.join(' ')} }`;
+  // A leaf that is a known inherited built-in member (e.g. constructor.name)
+  // carries a lib-fixed scalar type instead of an opaque `unknown`.
+  const value = fields.length === 0 ? (node.leafType ?? 'unknown') : `{ ${fields.join(' ')} }`;
   // A callable node is a method. Its own children describe the shape returned
   // by the call (e.g. `v.foo().bar()` -> foo(): { bar: (...args)=>unknown }).
   return node.callable === true ? `(...args: unknown[]) => ${value}` : value;

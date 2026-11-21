@@ -201,6 +201,21 @@ export const BUILTIN_MEMBERS_BY_SOURCE: ReadonlyMap<string, ReadonlySet<string>>
   ['object', OBJECT_BUILTIN_MEMBERS],
 ])
 
+/**
+ * lib-fixed scalar types for *terminal* members of a well-known inherited
+ * built-in chain. When the only structural evidence for a parameter is
+ * dereferencing a standard prototype member — e.g. `val.constructor.name`
+ * reads `Function.prototype.name` — the leaf type is dictated by lib.d.ts,
+ * not an opaque `unknown`. Keyed by the full dot-separated access chain so a
+ * user's own unrelated deep chain is never accidentally retyped. Only applied
+ * to a leaf with no further accessed children (see `insertShapeChain`).
+ * (v0.1.41.)
+ */
+export const BUILTIN_MEMBER_CHAIN_LEAF_TYPES: ReadonlyMap<string, string> = new Map([
+  ['constructor.name', 'string'],
+  ['constructor.length', 'number'],
+])
+
 /** Standard Array members — calling one says nothing about a custom shape. */
 export const ARRAY_BUILTIN_MEMBERS = new Set<string>([
   ...ITERATION_METHODS,

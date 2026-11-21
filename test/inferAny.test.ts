@@ -2222,12 +2222,43 @@ function ctorName(val) {
 module.exports = ctorName;
 `);
   try {
-    assert.match(output, /function ctorName\(val: \{ constructor\?: \{ name: unknown; \}; \}\): string\b/);
-    assert.doesNotMatch(output, /constructor: \{ name/);
+    // constructor stays optional; its `name` leaf is the lib-fixed `Function.name: string`
+    // (v0.1.41) rather than an opaque `unknown`.
+    assert.match(output, /function ctorName\(val: \{ constructor\?: \{ name: string; \}; \}\): string\b/);
+    assert.doesNotMatch(output, /name: unknown/);
     const strict = checkStrict(file, output, { allowJs: true });
     assert.ok(strict.ok, strict.diagnostics.join('\n'));
   } finally {
     cleanup();
+  }
+});
+
+test('well-known inherited built-in chain leaves get lib-fixed scalar types (v0.1.41)', () => {
+  // Dereferencing an inherited prototype member has a type dictated by
+  // lib.d.ts, not an opaque `unknown`: `constructor.name` is `string`,
+  // `constructor.length` is `number`. A deeper dereference of that leaf keeps
+  // the ordinary synthesized shape (the built-in rule applies only to a true
+  // leaf). Table-driven so new known chains need one entry.
+  const { output: nameOut, cleanup: c1 } = convertGuardJs(`
+function ctorName(val) { return (typeof val.constructor === 'function' ? val.constructor.name : null); }
+module.exports = ctorName;
+`);
+  const { output: lengthOut, cleanup: c2 } = convertGuardJs(`
+function ctorLength(val) { return (typeof val.constructor === 'function' ? val.constructor.length : null); }
+module.exports = ctorLength;
+`);
+  const { output: deepOut, cleanup: c3 } = convertGuardJs(`
+function deep(val) { return val.constructor.name.x; }
+module.exports = deep;
+`);
+  try {
+    assert.match(nameOut, /constructor\?: \{ name: string; \}/);
+    assert.match(lengthOut, /constructor\?: \{ length: number; \}/);
+    // Not a leaf anymore: `.name` has its own accessed child, so no scalar.
+    assert.match(deepOut, /constructor: \{ name: \{ x: unknown; \}; \}/);
+    assert.doesNotMatch(deepOut, /name: string/);
+  } finally {
+    c1(); c2(); c3();
   }
 });
 
