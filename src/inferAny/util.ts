@@ -561,7 +561,12 @@ export function splitTopLevelUnion(type: string): string[] {
     const ch = type[i] ?? '';
     if (ch === '<') {
       generic += 1;
-    } else if (ch === '>') {
+    } else if (ch === '>' && type[i - 1] !== '=') {
+      // A `>` closing an arrow (`=>`) is not a generic bracket. Counting it as
+      // one drifts the depth negative and makes a `|` nested inside a following
+      // generic (e.g. `(cb: any) => Promise<void | null>`) look top-level, which
+      // splits it into the broken members `(cb) => Promise<void` + `null>`.
+      // (Same guard as genericArguments / hasTopLevelArrow.)
       generic -= 1;
     } else if (ch === '(') {
       paren += 1;

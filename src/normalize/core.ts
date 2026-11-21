@@ -54,6 +54,10 @@ export function splitTopLevel(text: string, separator: string): string[] {
       quote = ch;
     } else if (ch === '<' || ch === '(' || ch === '[' || ch === '{') {
       depth += 1;
+    } else if (ch === '>' && text[i - 1] === '=') {
+      // Arrow `=>`: the `>` is part of the token, not a generic closer. Without
+      // this guard `(cb) => Promise<void | null>` loses one depth unit and the
+      // inner `|` is split as if top-level.
     } else if (ch === '>' || ch === ')' || ch === ']' || ch === '}') {
       depth = Math.max(0, depth - 1);
     } else if (ch === separator && depth === 0) {
@@ -199,6 +203,8 @@ export function hasTopLevelArrow(text: string): boolean {
     const ch = text[i] ?? '';
     if (ch === '<' || ch === '(' || ch === '[' || ch === '{') {
       depth += 1;
+    } else if (ch === '>' && text[i - 1] === '=') {
+      // Arrow `=>` closer: not a generic bracket (see splitTopLevel).
     } else if (ch === '>' || ch === ')' || ch === ']' || ch === '}') {
       depth = Math.max(0, depth - 1);
     } else if (ch === '=' && text[i + 1] === '>' && depth === 0) {

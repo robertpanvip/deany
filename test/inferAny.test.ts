@@ -14,6 +14,7 @@ import { collectDeclarations } from '../src/inferAny/collect.js';
 import { collectEvidence } from '../src/inferAny/evidence.js';
 import { mergeEvidence } from '../src/inferAny/shape.js';
 import { variableNameSuggestsType } from '../src/inferAny/constants.js';
+import { splitTopLevelUnion } from '../src/inferAny/util.js';
 
 const compilerOptions: ts.CompilerOptions = {
   strict: true,
@@ -2351,4 +2352,45 @@ test('generic built-in-member filtering across all memberless guard sources (v0.
   objCtor.sources.push('object');
   objCtor.properties.set('constructor', 'unknown');
   assert.equal(mergeEvidence(objCtor).type, 'object & { constructor: unknown; }');
+});
+
+test('splitTopLevelUnion does not split a | nested inside a generic after an arrow (v0.1.42)', () => {
+  // A `>` that closes an arrow (`=>`) is not a generic bracket. Counting it as
+  // one drifts the depth and makes the `|` inside `Promise<void | null>` look
+  // top-level, emitting the broken members `(cb) => Promise<void` + `null>`
+  // and, downstream, invalid syntax `Promise<void) | null>` (react-dom's
+  // scheduleTimeout). The generic union must stay intact.
+  assert.deepEqual(
+    splitTopLevelUnion('(callback: any) => Promise<void | null>'),
+    ['(callback: any) => Promise<void | null>'],
+  );
+  assert.deepEqual(
+    splitTopLevelUnion(
+      '((handler: TimerHandler, timeout?: number) => number) | ((callback: any) => Promise<void | null>) | undefined',
+    ),
+    [
+      '((handler: TimerHandler, timeout?: number) => number)',
+      '((callback: any) => Promise<void | null>)',
+      'undefined',
+    ],
+  );
+  // A genuine top-level union is still split.
+  assert.deepEqual(splitTopLevelUnion('string | number'), ['string', 'number']);
+});
+
+test('a nested generic union in a function type is emitted with balanced brackets (v0.1.42)', () => {
+  // End-to-end: a value whose observed type contains an arrow returning a
+  // generic with a union inside must not lose a `>` and gain a stray `)`.
+  const { output, cleanup } = convertGuardJs(`
+function pick(cb) { return cb; }
+var scheduleTimeout = typeof setTimeout === 'function' ? setTimeout : undefined;
+module.exports = { pick, scheduleTimeout };
+`);
+  try {
+    // No broken `Promise<void) | null>` shape anywhere in the output.
+    assert.doesNotMatch(output, /Promise<void\)/);
+    assert.doesNotMatch(output, /null>/);
+  } finally {
+    cleanup();
+  }
 });
