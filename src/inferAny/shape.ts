@@ -2,7 +2,7 @@ import * as ts from 'typescript';
 import { hasTopLevelArrow } from '../normalize.js';
 
 import type { Evidence, InferenceContext, ShapeNode } from './types.js';
-import { FUNCTION_BUILTIN_MEMBERS, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES } from './constants.js';
+import { BUILTIN_MEMBERS_BY_SOURCE, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES } from './constants.js';
 import { addStringIndexSignature, isArrayTypeString, splitTopLevelUnion } from './util.js';
 import { uniqueBuiltinReceiverType } from './typeText.js';
 
@@ -433,13 +433,14 @@ export function mergeEvidence(evidence: Evidence): {
         continue;
       }
       if (MEMBERLESS_OBJECT_SOURCES.has(source)) {
-        // `Function` already declares apply/call/bind/name/length/... in lib.d.ts.
-        // Accessing one of them (e.g. `func.apply(...)`) is not evidence of a
-        // custom member — intersecting it would emit a misleading weak override
-        // of the native signature (`Function & { apply: (...args) => unknown }`).
-        // Keep only genuinely custom properties; if none remain, leave the bare
-        // `Function` source untouched. `object` has no such builtins. (v0.1.39.)
-        const exclude = source === 'Function' ? FUNCTION_BUILTIN_MEMBERS : undefined;
+        // A guarded source (`Function` / `object`) already inherits built-in
+        // members from lib.d.ts. Accessing one of them (e.g. `func.apply(...)`
+        // or `o.hasOwnProperty(...)`) is not evidence of a custom shape — and
+        // intersecting a weak `(...args) => unknown` signature would override
+        // the native one and raise TS18046. Filter the source's native members
+        // via the central table; keep only genuinely custom properties. If none
+        // remain, leave the bare source untouched. (v0.1.39/40.)
+        const exclude = BUILTIN_MEMBERS_BY_SOURCE.get(source);
         const shape = renderPropertyShape(evidence.properties, exclude);
         const hasCustom =
           exclude === undefined ||

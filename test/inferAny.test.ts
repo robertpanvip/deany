@@ -2282,3 +2282,42 @@ test('Function built-in members are not re-intersected into a Function source (v
   objectShape.properties.set('apply', 'unknown');
   assert.equal(mergeEvidence(objectShape).type, 'object & { name: unknown; apply: unknown; }');
 });
+
+test('generic built-in-member filtering across all memberless guard sources (v0.1.40)', () => {
+  // Object.prototype methods are inherited by every object; recording one as a
+  // weak `(...args) => unknown` property overrides the native signature and
+  // raises TS18046. The central BUILTIN_MEMBERS_BY_SOURCE table must filter
+  // them for BOTH `Function` and `object` sources, while leaving genuinely
+  // custom members (and the `constructor` data property) intact.
+  const fnHop = emptyEvidence();
+  fnHop.sources.push('Function');
+  fnHop.properties.set('hasOwnProperty', '(...args: unknown[]) => unknown');
+  fnHop.properties.set('toString', 'string');
+  fnHop.properties.set('valueOf', 'unknown');
+  assert.equal(mergeEvidence(fnHop).type, 'Function');
+
+  const objHop = emptyEvidence();
+  objHop.sources.push('object');
+  objHop.properties.set('hasOwnProperty', '(...args: unknown[]) => unknown');
+  objHop.properties.set('isPrototypeOf', 'unknown');
+  assert.equal(mergeEvidence(objHop).type, 'object');
+
+  // `name` is native to Function but a real custom field on an object guard —
+  // each source must use only its own built-in set.
+  const fnName = emptyEvidence();
+  fnName.sources.push('Function');
+  fnName.properties.set('name', 'unknown');
+  assert.equal(mergeEvidence(fnName).type, 'Function');
+
+  const objName = emptyEvidence();
+  objName.sources.push('object');
+  objName.properties.set('name', 'unknown');
+  objName.properties.set('displayName', 'unknown');
+  assert.equal(mergeEvidence(objName).type, 'object & { name: unknown; displayName: unknown; }');
+
+  // `constructor` is excluded from the filtered set (real data, v0.1.38).
+  const objCtor = emptyEvidence();
+  objCtor.sources.push('object');
+  objCtor.properties.set('constructor', 'unknown');
+  assert.equal(mergeEvidence(objCtor).type, 'object & { constructor: unknown; }');
+});

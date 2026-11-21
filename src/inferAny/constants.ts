@@ -163,16 +163,42 @@ export function variableNameSuggestsType(name: string): string | undefined {
 }
 
 /**
- * Standard `Function` members (lib.d.ts `interface Function`). Calling or
- * reading one of these on a value already inferred as `Function` says nothing
- * about a custom shape — `func.apply(...)` does not justify intersecting
- * `Function & { apply: (...args) => unknown }`. Filtering them keeps the
- * inferred type honest (the native signature is already present) and avoids a
- * misleading weak override of the real lib signature. (v0.1.39.)
+ * `Object.prototype` members — inherited by every object, so calling/reading
+ * one on a guarded value says nothing about a custom shape. Recording them as
+ * a weak `(...args: unknown[]) => unknown` property would OVERRIDE the real
+ * lib signature and raise TS18046 ("is of type unknown, not callable"). (v0.1.40.)
+ *
+ * `constructor` is deliberately excluded: it is routinely used as real data
+ * (`ctorName(x)` reads `x.constructor.name`, v0.1.38), so filtering it would
+ * erase meaningful structural evidence.
+ */
+export const OBJECT_BUILTIN_MEMBERS = new Set<string>([
+  'hasOwnProperty', 'toString', 'valueOf', 'isPrototypeOf',
+  'propertyIsEnumerable', 'toLocaleString', '__proto__',
+])
+
+/**
+ * Standard `Function` members (lib.d.ts `interface Function`) plus the
+ * `Object.prototype` members it inherits. Accessing one of these on a value
+ * already inferred as `Function` is not evidence of a custom shape — filtering
+ * them avoids a misleading weak override of the native lib signature. (v0.1.39/40.)
  */
 export const FUNCTION_BUILTIN_MEMBERS = new Set<string>([
-  'apply', 'call', 'bind', 'toString', 'prototype',
+  'apply', 'call', 'bind', 'prototype',
   'length', 'name', 'arguments', 'caller',
+  ...OBJECT_BUILTIN_MEMBERS,
+])
+
+/**
+ * Generic built-in-member lookup: given a memberless/guard source type, the
+ * members that are native to it and must NOT be re-intersected as custom shape
+ * evidence. Centralised so new built-in types only need one table entry.
+ * (v0.1.40.) Returns `undefined` for sources with no known built-ins (e.g.
+ * bare `object` beyond Object.prototype is handled via OBJECT_BUILTIN_MEMBERS).
+ */
+export const BUILTIN_MEMBERS_BY_SOURCE: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ['Function', FUNCTION_BUILTIN_MEMBERS],
+  ['object', OBJECT_BUILTIN_MEMBERS],
 ])
 
 /** Standard Array members — calling one says nothing about a custom shape. */
