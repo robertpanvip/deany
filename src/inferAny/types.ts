@@ -140,6 +140,12 @@ export type CallSite = ts.CallExpression | ts.NewExpression;
 export interface ShapeNode {
   readonly children: Map<string, ShapeNode>;
   /**
+   * True when the code guarded this property with a type probe before using
+   * it (`typeof o.prop === '...'`, `o.prop != null`). The probe signals the
+   * property may be absent, so it is rendered optional (`prop?:`). (v0.1.38.)
+   */
+  optional?: boolean;
+  /**
    * True when this node was observed being *called* (e.g. `x.foo()` or a
    * for-of element's `x.toUpperCase()`). Rendered as a callable signature so
    * strict mode accepts the call instead of TS18046 ("not callable"). A

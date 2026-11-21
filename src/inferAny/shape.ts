@@ -10,6 +10,7 @@ export function insertShapeChain(
   root: ShapeNode,
   chain: readonly string[],
   callable = false,
+  optional = false,
 ): void {
   let node = root;
   for (const key of chain) {
@@ -25,6 +26,16 @@ export function insertShapeChain(
   if (callable) {
     node.callable = true;
   }
+  // A chain whose first segment was guarded by a type probe before use marks
+  // that first node optional: the probe signals the property may be absent.
+  // Only the first segment is marked — nested accesses (`o.a.b`) describe the
+  // shape of `a` itself, which the probe did not directly guard.
+  if (optional && chain.length > 0) {
+    let first = root.children.get(chain[0]!);
+    if (first !== undefined) {
+      first.optional = true;
+    }
+  }
 }
 
 export function renderShapeNode(node: ShapeNode): string {
@@ -32,7 +43,11 @@ export function renderShapeNode(node: ShapeNode): string {
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, child]) => {
       const name = /^[A-Za-z_$][\w$]*$/.test(key) ? key : JSON.stringify(key);
-      return `${name}: ${renderShapeNode(child)};`;
+      // A property guarded by a type probe (`typeof o.p === '...'`) before use
+      // may be absent; render it optional so callers are not forced to supply
+      // it. Optional + callable is still a valid method signature (`p?(): T`).
+      const optional = child.optional === true ? '?' : '';
+      return `${name}${optional}: ${renderShapeNode(child)};`;
     });
   const value = fields.length === 0 ? 'unknown' : `{ ${fields.join(' ')} }`;
   // A callable node is a method. Its own children describe the shape returned

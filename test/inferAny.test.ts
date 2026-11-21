@@ -2208,3 +2208,44 @@ module.exports = has;
     cleanup();
   }
 });
+
+test('type-probed properties are rendered optional (ctorName.constructor)', () => {
+  // `typeof val.constructor === 'function' ? val.constructor.name : null`:
+  // guarding a property with typeof before using it means it may be absent,
+  // so the synthesized shape must mark it optional (`constructor?:`). The
+  // typeof guard narrows back to Function at the access site, so strict mode
+  // still accepts `val.constructor.name`. (v0.1.38.)
+  const { output, file, cleanup } = convertGuardJs(`
+function ctorName(val) {
+  return (typeof val.constructor === 'function' ? val.constructor.name : null);
+}
+module.exports = ctorName;
+`);
+  try {
+    assert.match(output, /function ctorName\(val: \{ constructor\?: \{ name: unknown; \}; \}\): string\b/);
+    assert.doesNotMatch(output, /constructor: \{ name/);
+    const strict = checkStrict(file, output, { allowJs: true });
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('null-guarded property is optional; an unguarded property read stays required', () => {
+  // A `!= null` probe is the same "may be absent" signal as typeof; a plain
+  // dereference with no probe is genuine structural evidence and stays required.
+  const { output, cleanup: c1 } = convertGuardJs(`
+function probe(val) { if (val.foo != null) return val.foo.x; return 0; }
+module.exports = probe;
+`);
+  const { output: out2, cleanup: c2 } = convertGuardJs(`
+function plain(val) { return val.bar.baz; }
+module.exports = plain;
+`);
+  try {
+    assert.match(out2, /function plain\(val: \{ bar: \{ baz: unknown; \}; \}\)/);
+    assert.match(output, /function probe\(val: \{ foo\?: \{ x: unknown; \}; \}\)/);
+  } finally {
+    c1(); c2();
+  }
+});

@@ -245,6 +245,50 @@ function transparentUseNode(reference: ts.Identifier): ts.Expression {
 }
 
 /** Extract constraints from one reference to the `any`-typed binding. */
+/**
+ * True when a property access is guarded by a type probe *before* it is used —
+ * `typeof o.p === '...'` or `o.p != null`. The very presence of the probe means
+ * the code tolerates p being absent, so a synthesized shape should render p
+ * optional (`p?:`) instead of forcing every caller to supply it. (v0.1.38.)
+ */
+function isTypeProbedPropertyAccess(expr: ts.PropertyAccessExpression): boolean {
+  const parent: ts.Node | undefined = expr.parent;
+  if (parent === undefined) return false;
+  // typeof o.p === 'literal' / !== 'literal' (covers 'undefined', 'function', ...)
+  if (ts.isTypeOfExpression(parent) && parent.expression === expr) {
+    const comparison = parent.parent;
+    if (
+      comparison !== undefined &&
+      ts.isBinaryExpression(comparison) &&
+      (comparison.left === parent || comparison.right === parent)
+    ) {
+      const other = comparison.left === parent ? comparison.right : comparison.left;
+      if (ts.isStringLiteral(other) || ts.isNoSubstitutionTemplateLiteral(other)) {
+        return true;
+      }
+    }
+  }
+  // o.p != null / == null / === undefined / !== undefined
+  if (ts.isBinaryExpression(parent)) {
+    const op = parent.operatorToken.kind;
+    if (
+      op === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+      op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+      op === ts.SyntaxKind.ExclamationEqualsToken ||
+      op === ts.SyntaxKind.EqualsEqualsToken
+    ) {
+      const other = parent.left === expr ? parent.right : parent.left;
+      if (
+        other.kind === ts.SyntaxKind.NullKeyword ||
+        (ts.isIdentifier(other) && other.text === 'undefined')
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function constraintsFromReference(
   reference: ts.Identifier,
   ctx: InferenceContext,
@@ -385,6 +429,13 @@ export function constraintsFromReference(
   // `unknown` would trigger TS18046 ("not callable"). A method signature, once
   // recorded, is never downgraded to a plain `unknown` by a later read.
   if (ts.isPropertyAccessExpression(parent) && parent.expression === useNode) {
+    // `typeof val.constructor === 'function' ? val.constructor.name : null`:
+    // the typeof probe before use means `constructor` may be absent, so the
+    // synthesized first-level shape marks it optional (`constructor?:`). The
+    // same applies to `val.p != null` guards. (v0.1.38.)
+    if (isTypeProbedPropertyAccess(parent)) {
+      insertShapeChain(evidence.shapeChain, [parent.name.text], false, true);
+    }
     const grandparent = parent.parent;
 
     // `o.a.b` / `o.a.b.c`: collect the full access chain so a parameter with
