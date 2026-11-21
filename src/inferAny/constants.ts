@@ -162,6 +162,19 @@ export function variableNameSuggestsType(name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Standard `Function` members (lib.d.ts `interface Function`). Calling or
+ * reading one of these on a value already inferred as `Function` says nothing
+ * about a custom shape — `func.apply(...)` does not justify intersecting
+ * `Function & { apply: (...args) => unknown }`. Filtering them keeps the
+ * inferred type honest (the native signature is already present) and avoids a
+ * misleading weak override of the real lib signature. (v0.1.39.)
+ */
+export const FUNCTION_BUILTIN_MEMBERS = new Set<string>([
+  'apply', 'call', 'bind', 'toString', 'prototype',
+  'length', 'name', 'arguments', 'caller',
+])
+
 /** Standard Array members — calling one says nothing about a custom shape. */
 export const ARRAY_BUILTIN_MEMBERS = new Set<string>([
   ...ITERATION_METHODS,

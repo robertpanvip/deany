@@ -8,7 +8,7 @@ import { inferAnyInProject, createUsageResolver } from '../src/inferAny.js';
 import { checkStrict } from '../src/check.js';
 import { convertSource } from '../src/convert.js';
 import { buildInferenceTable } from '../src/inferAny/table.js';
-import { createContext, createTable, MAX_FIXED_POINT_ROUNDS } from '../src/inferAny/state.js';
+import { createContext, createTable, emptyEvidence, MAX_FIXED_POINT_ROUNDS } from '../src/inferAny/state.js';
 import { collectAnyOwners } from '../src/inferAny/collect.js';
 import { collectDeclarations } from '../src/inferAny/collect.js';
 import { collectEvidence } from '../src/inferAny/evidence.js';
@@ -2248,4 +2248,37 @@ module.exports = plain;
   } finally {
     c1(); c2();
   }
+});
+
+test('Function built-in members are not re-intersected into a Function source (v0.1.39)', () => {
+  // `func.apply(...)` on a value already narrowed to `Function` must not emit
+  // `Function & { apply: (...args) => unknown }`: Function.apply is native in
+  // lib.d.ts, so the intersection is redundant and misleading. Custom members
+  // are still intersected (that is real structural evidence).
+  const withApply = emptyEvidence();
+  withApply.sources.push('Function');
+  withApply.properties.set('apply', '(...args: unknown[]) => unknown');
+  assert.equal(mergeEvidence(withApply).type, 'Function');
+
+  const withCallBind = emptyEvidence();
+  withCallBind.sources.push('Function');
+  withCallBind.properties.set('call', '(...args: unknown[]) => unknown');
+  withCallBind.properties.set('bind', '(...args: unknown[]) => unknown');
+  assert.equal(mergeEvidence(withCallBind).type, 'Function');
+
+  // A genuine custom member alongside a built-in must survive: only the
+  // built-in is filtered, `myCustom` is kept.
+  const withCustom = emptyEvidence();
+  withCustom.sources.push('Function');
+  withCustom.properties.set('apply', '(...args: unknown[]) => unknown');
+  withCustom.properties.set('myCustom', 'unknown');
+  assert.equal(mergeEvidence(withCustom).type, 'Function & { myCustom: unknown; }');
+
+  // `object` (the other memberless guard source) has no built-ins: its
+  // members must all be intersected as before.
+  const objectShape = emptyEvidence();
+  objectShape.sources.push('object');
+  objectShape.properties.set('name', 'unknown');
+  objectShape.properties.set('apply', 'unknown');
+  assert.equal(mergeEvidence(objectShape).type, 'object & { name: unknown; apply: unknown; }');
 });

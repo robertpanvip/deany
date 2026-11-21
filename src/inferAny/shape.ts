@@ -2,7 +2,7 @@ import * as ts from 'typescript';
 import { hasTopLevelArrow } from '../normalize.js';
 
 import type { Evidence, InferenceContext, ShapeNode } from './types.js';
-import { INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES } from './constants.js';
+import { FUNCTION_BUILTIN_MEMBERS, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES } from './constants.js';
 import { addStringIndexSignature, isArrayTypeString, splitTopLevelUnion } from './util.js';
 import { uniqueBuiltinReceiverType } from './typeText.js';
 
@@ -56,11 +56,16 @@ export function renderShapeNode(node: ShapeNode): string {
 }
 
 /** Render accessed properties as an inline object type, e.g. `{ a: number; }`. */
-export function renderPropertyShape(properties: ReadonlyMap<string, string>): string {
-  const fields = [...properties.entries()].map(([name, type]) => {
-    const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
-    return `${key}: ${type};`;
-  });
+export function renderPropertyShape(
+  properties: ReadonlyMap<string, string>,
+  exclude?: ReadonlySet<string>,
+): string {
+  const fields = [...properties.entries()]
+    .filter(([name]) => exclude === undefined || !exclude.has(name))
+    .map(([name, type]) => {
+      const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
+      return `${key}: ${type};`;
+    });
   return `{ ${fields.join(' ')} }`;
 }
 
@@ -422,15 +427,27 @@ export function mergeEvidence(evidence: Evidence): {
   // concrete call-site type can refine it, as the property-shape last resort.
   let narrowedFromGuards = false;
   if (evidence.properties.size > 0) {
-    const shape = renderPropertyShape(evidence.properties);
     for (let i = 0; i < sources.length; i += 1) {
       const source = sources[i];
       if (source === undefined) {
         continue;
       }
       if (MEMBERLESS_OBJECT_SOURCES.has(source)) {
-        sources[i] = `${source} & ${shape}`;
-        narrowedFromGuards = true;
+        // `Function` already declares apply/call/bind/name/length/... in lib.d.ts.
+        // Accessing one of them (e.g. `func.apply(...)`) is not evidence of a
+        // custom member — intersecting it would emit a misleading weak override
+        // of the native signature (`Function & { apply: (...args) => unknown }`).
+        // Keep only genuinely custom properties; if none remain, leave the bare
+        // `Function` source untouched. `object` has no such builtins. (v0.1.39.)
+        const exclude = source === 'Function' ? FUNCTION_BUILTIN_MEMBERS : undefined;
+        const shape = renderPropertyShape(evidence.properties, exclude);
+        const hasCustom =
+          exclude === undefined ||
+          [...evidence.properties.keys()].some((key) => !exclude.has(key));
+        if (hasCustom) {
+          sources[i] = `${source} & ${shape}`;
+          narrowedFromGuards = true;
+        }
       } else if (evidence.objectLiteralInit) {
         // An object literal later extended with `obj.field = v` / `obj.m()`
         // really has those members. Absorb them into its own shape source;
