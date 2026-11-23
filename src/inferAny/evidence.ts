@@ -9,7 +9,7 @@ import { arrayElementTypeOf, functionLikeName, isArrayIsArrayCall, isArrayTypeSt
 import { callResultShape, customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsWithCallsOf, renderShapeNode } from './shape.js';
 import { arithmeticNumberType, instanceTypeOf, noteDependency, orderableOperandType, symbolTypeText, typePredicateOfArgument, typeText } from './typeText.js';
 import { collectMutationEvidence, containerInstantiationFromMutations } from './mutation.js';
-import { callsOf, referencesOf } from './collect.js';
+import { callsOf, isPureAliasBinding, referencesOf } from './collect.js';
 
 /**
  * Whether control can reach the end of a statement list (i.e. fall through to
@@ -433,6 +433,13 @@ export function constraintsFromReference(
       const aliasType = typeText(ctx, parent.name);
       if (aliasType !== undefined && !VAGUE_RETURN_TYPES.has(aliasType)) {
         addSource(evidence, aliasType);
+        // Also tag it as an alias-derived source when the alias is genuine
+        // (never reassigned). Sibling alias sources describe the same object
+        // and are field-merged in mergeEvidence; this tag keeps call-site /
+        // assignment sources on their normal union semantics. (v0.1.45.)
+        if (isPureAliasBinding(parent, ctx)) {
+          evidence.aliasSources.push(aliasType);
+        }
       }
     }
   }

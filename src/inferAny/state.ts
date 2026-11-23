@@ -43,6 +43,7 @@ export function createContext(
 export function emptyEvidence(): Evidence {
   return {
     sources: [],
+    aliasSources: [],
     weakSources: [],
     constraints: [],
     properties: new Map<string, string>(),

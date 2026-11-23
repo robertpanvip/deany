@@ -183,6 +183,16 @@ export interface ShapeNode {
 export interface Evidence {
   readonly sources: string[];
   /**
+   * Covariant sources that arrived specifically through a pure-alias reflow
+   * (`let a = b` feeding `typeText(a)` back into `b`). When several of these
+   * are plain object shapes they all describe the SAME object (the aliases are
+   * just other names for it), so they are merged field-wise into the maximal
+   * shape instead of being unioned as alternative value types. Sources from
+   * call sites, assignments and guards are NOT tracked here and keep union
+   * semantics. (v0.1.45.)
+   */
+  readonly aliasSources: string[];
+  /**
    * Low-confidence covariant sources. These come from call-site arguments of
    * exported (public-API) parameters: internal usage is not a reliable contract
    * for a value outside callers can supply. They never outrank `sources`, and

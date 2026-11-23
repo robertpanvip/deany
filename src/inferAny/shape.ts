@@ -86,6 +86,132 @@ export function renderShapeNode(node: ShapeNode): string {
   return node.callable === true ? `(...args: unknown[]) => ${value}` : value;
 }
 
+/**
+ * True when a type string is a plain inline object shape (`{ a: number; }`),
+ * i.e. something whose fields can be merged field-by-field. Inline unions or
+ * intersections at the top level (`{ a } | { b }`, `Foo & { a }`) are NOT plain
+ * object shapes: merging their members would invent a type no value has.
+ */
+export function isPlainObjectShapeText(text: string): boolean {
+  const s = text.trim();
+  if (!s.startsWith('{') || !s.endsWith('}')) {
+    return false;
+  }
+  const body = s.slice(1, -1);
+  let generic = 0;
+  let paren = 0;
+  let brace = 0;
+  let bracket = 0;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body[i] ?? '';
+    if (ch === '<') generic += 1;
+    else if (ch === '>') generic -= 1;
+    else if (ch === '(') paren += 1;
+    else if (ch === ')') paren -= 1;
+    else if (ch === '{') brace += 1;
+    else if (ch === '}') brace -= 1;
+    else if (ch === '[') bracket += 1;
+    else if (ch === ']') bracket -= 1;
+    else if (
+      (ch === '|' || ch === '&') &&
+      generic === 0 && paren === 0 && brace === 0 && bracket === 0
+    ) {
+      return false;
+    }
+  }
+  return generic === 0 && paren === 0 && brace === 0 && bracket === 0;
+}
+
+/** Split one object field (`name?: T`) into its name, type and optional flag. */
+function splitFieldNameType(field: string): { name: string; type: string; optional: boolean } | undefined {
+  let generic = 0;
+  let paren = 0;
+  let brace = 0;
+  let bracket = 0;
+  for (let i = 0; i < field.length; i += 1) {
+    const ch = field[i] ?? '';
+    if (ch === '<') generic += 1;
+    else if (ch === '>') generic -= 1;
+    else if (ch === '(') paren += 1;
+    else if (ch === ')') paren -= 1;
+    else if (ch === '{') brace += 1;
+    else if (ch === '}') brace -= 1;
+    else if (ch === '[') bracket += 1;
+    else if (ch === ']') bracket -= 1;
+    else if (ch === ':' && generic === 0 && paren === 0 && brace === 0 && bracket === 0) {
+      let name = field.slice(0, i).trim();
+      const optional = name.endsWith('?');
+      if (optional) {
+        name = name.slice(0, -1).trim();
+      }
+      return { name, type: field.slice(i + 1).trim(), optional };
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Merge several plain object-shape strings into one maximal shape by unioning
+ * their fields. A field present in any shape is present in the result; nested
+ * object fields merge recursively; conflicting scalar types widen to a union.
+ * A field is optional only when it is optional in every shape that has it.
+ * Returns undefined when there is nothing to merge (no plain object shape or
+ * no fields), so callers can leave the original sources untouched.
+ */
+export function mergeObjectShapes(shapes: readonly string[]): string | undefined {
+  // Guard against runaway growth in alias cycles: a shape whose text is
+  // enormous is almost certainly an accumulated fixed-point artifact, not a
+  // real object literal. Refuse to merge it (returning undefined leaves the
+  // original sources intact) rather than building an ever-larger string.
+  // (v0.1.45.)
+  const MAX_SHAPE_TEXT = 200_000;
+  for (const shape of shapes) {
+    if (shape.length > MAX_SHAPE_TEXT) {
+      return undefined;
+    }
+  }
+  const fields = new Map<string, { type: string; optional: boolean }>();
+  let any = false;
+  for (const shape of shapes) {
+    const s = shape.trim();
+    if (!isPlainObjectShapeText(s)) {
+      continue;
+    }
+    any = true;
+    for (const field of splitTopLevelFields(s.slice(1, -1))) {
+      const parsed = splitFieldNameType(field);
+      if (parsed === undefined || parsed.name.length === 0) {
+        continue;
+      }
+      const previous = fields.get(parsed.name);
+      if (previous === undefined) {
+        fields.set(parsed.name, { type: parsed.type, optional: parsed.optional });
+        continue;
+      }
+      let type: string;
+      if (previous.type === parsed.type) {
+        type = parsed.type;
+      } else if (isPlainObjectShapeText(previous.type) && isPlainObjectShapeText(parsed.type)) {
+        type = mergeObjectShapes([previous.type, parsed.type]) ?? unionLeafType(previous.type, parsed.type);
+      } else {
+        type = unionLeafType(previous.type, parsed.type);
+      }
+      fields.set(parsed.name, { type, optional: previous.optional && parsed.optional });
+    }
+  }
+  if (!any || fields.size === 0) {
+    return undefined;
+  }
+  const rendered = [...fields.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, { type, optional }]) => {
+      const key = /^[A-Za-z_$][\w$]*$/.test(name) ? name : JSON.stringify(name);
+      return `${key}${optional ? '?' : ''}: ${type};`;
+    });
+  return `{ ${rendered.join(' ')} }`;
+}
+
+
 /** Render accessed properties as an inline object type, e.g. `{ a: number; }`. */
 export function renderPropertyShape(
   properties: ReadonlyMap<string, string>,
@@ -424,6 +550,39 @@ export function mergeEvidence(evidence: Evidence): {
   const allowed = intersectConstraints(evidence.constraints);
   let members: string[];
 
+  // Same-object alias-source merge (v0.1.45): sibling pure aliases of one
+  // binding are just other names for the SAME object, so their reflowed object
+  // shapes must be combined field-wise into the maximal shape — not unioned as
+  // alternative value types. Only sources explicitly tagged as alias-derived
+  // (`aliasSources`) and that are plain object shapes participate; call-site,
+  // assignment and guard sources keep their normal union semantics. (v0.1.45.)
+  let aliasMerged = false;
+  const aliasObjShapes = [...new Set(
+    evidence.aliasSources.flatMap(splitTopLevelUnion).filter((s) => isPlainObjectShapeText(s)),
+  )];
+  if (aliasObjShapes.length >= 2) {
+    const maxShape = mergeObjectShapes(aliasObjShapes);
+    if (maxShape !== undefined) {
+      const aliasSet = new Set(aliasObjShapes);
+      // Replace every tagged alias object source with the single merged shape.
+      const replaced: string[] = [];
+      let sawAlias = false;
+      for (const src of sources) {
+        if (aliasSet.has(src)) {
+          sawAlias = true;
+        } else {
+          replaced.push(src);
+        }
+      }
+      if (sawAlias) {
+        replaced.push(maxShape);
+        sources.length = 0;
+        sources.push(...replaced);
+        aliasMerged = true;
+      }
+    }
+  }
+
   // Refine an otherwise-opaque `unknown[]` into an array of the shape collected
   // from iteration callback property chains. Only when `unknown[]` is the sole
   // source: a concrete array source (e.g. `number[]` from a call site) wins.
@@ -493,7 +652,7 @@ export function mergeEvidence(evidence: Evidence): {
   // A shape synthesized purely from accessed properties is weak evidence: a
   // later round may find a concrete type (e.g. a call-site argument) that is
   // more precise and should replace it.
-  let weak = narrowedFromGuards;
+  let weak = narrowedFromGuards || aliasMerged;
 
   if (sources.length > 0) {
     // Observed values are authoritative; constraints may narrow them.

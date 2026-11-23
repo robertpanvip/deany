@@ -2459,6 +2459,48 @@ module.exports = f;
   }
 });
 
+test('sibling pure aliases merge their shapes into a maximal shape (v0.1.45)', () => {
+  // Two aliases of one binding each write a different field. They denote the
+  // SAME object, so the reflowed object shapes are merged field-wise into
+  // `{ x; y }` rather than unioned as `{ x } | { y }`.
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { let a = b; let c = b; a.x = 1; c.y = 's'; return b; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(b: \{ x: number; y: string; \}\)/);
+    assert.doesNotMatch(output, /\{ x: number; \} \| \{ y: string; \}/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('three aliases merge all their fields (v0.1.45)', () => {
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { let a = b; let c = b; let d = b; a.x = 1; c.y = 's'; d.z = true; return b; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(b: \{ x: number; y: string; z: boolean; \}\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('reassigned binding is not a pure alias and does not merge shapes (v0.1.45)', () => {
+  // `a` is reassigned, so it is not a stable alias of `b`. Its writes must not
+  // be folded onto `b`; only `b`'s own evidence decides its type.
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { let a = b; a = { q: 1 }; a.x = 1; return b; }
+module.exports = f;
+`);
+  try {
+    assert.doesNotMatch(output, /\{ x: number; \}/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('array destructuring folds binding element shapes into the element type (v0.1.44)', () => {
   // `const [a, b] = arr; a.x = 1` — the binding elements are the container's
   // elements, so their dereferenced shape refines the opaque Iterable element.

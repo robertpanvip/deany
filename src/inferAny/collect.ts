@@ -21,6 +21,40 @@ export function referencesOf(symbol: ts.Symbol, ctx: InferenceContext): ts.Ident
   return getScan(ctx).references.get(symbol) ?? [];
 }
 
+/**
+ * True for a *pure* alias: initialized from a bare identifier with no
+ * annotation and never reassigned. Only such a binding denotes the same object
+ * as its initializer throughout its lifetime, so its reflowed source describes
+ * the same object and may be field-merged with sibling alias sources. (v0.1.45.)
+ */
+export function isPureAliasBinding(decl: ts.VariableDeclaration, ctx: InferenceContext): boolean {
+  if (decl.type !== undefined || decl.initializer === undefined || !ts.isIdentifier(decl.initializer)) {
+    return false;
+  }
+  const symbol = ctx.checker.getSymbolAtLocation(decl.name);
+  if (symbol === undefined) {
+    return false;
+  }
+  for (const ref of referencesOf(symbol, ctx)) {
+    const p = ref.parent;
+    if (p === undefined || p === decl) {
+      continue;
+    }
+    if (
+      (ts.isBinaryExpression(p) &&
+        p.left === ref &&
+        isAssignmentOperatorKind(p.operatorToken.kind)) ||
+      ((ts.isPrefixUnaryExpression(p) || ts.isPostfixUnaryExpression(p)) &&
+        (p.operator === ts.SyntaxKind.PlusPlusToken ||
+          p.operator === ts.SyntaxKind.MinusMinusToken)) ||
+      ((ts.isForOfStatement(p) || ts.isForInStatement(p)) && p.initializer === ref)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 /** True for `let`/`var x;` that has no initializer and is never assigned
  * anywhere in the program. Replacing such an `any` with a concrete type makes
  * TypeScript start definite-assignment analysis and emit TS2454 ("used before
