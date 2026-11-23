@@ -27,8 +27,17 @@ export function referencesOf(symbol: ts.Symbol, ctx: InferenceContext): ts.Ident
  * as its initializer throughout its lifetime, so its reflowed source describes
  * the same object and may be field-merged with sibling alias sources. (v0.1.45.)
  */
-export function isPureAliasBinding(decl: ts.VariableDeclaration, ctx: InferenceContext): boolean {
-  if (decl.type !== undefined || decl.initializer === undefined || !ts.isIdentifier(decl.initializer)) {
+export function isPureAliasBinding(
+  decl: ts.VariableDeclaration,
+  ctx: InferenceContext,
+  allowPropertyAccess = false,
+): boolean {
+  if (
+    decl.type !== undefined ||
+    decl.initializer === undefined ||
+    (!ts.isIdentifier(decl.initializer) &&
+      !(allowPropertyAccess && ts.isPropertyAccessExpression(decl.initializer)))
+  ) {
     return false;
   }
   const symbol = ctx.checker.getSymbolAtLocation(decl.name);

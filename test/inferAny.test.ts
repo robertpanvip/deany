@@ -2582,3 +2582,84 @@ module.exports = g;
     cleanup(); c2();
   }
 });
+
+test('Object.assign source shapes merge into the target binding (v0.1.47)', () => {
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { Object.assign(b, { x: 1, y: 's' }); return b; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(b: \{ x: number; y: string; \}\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Object.assign with an opaque source does not fabricate fields (v0.1.47)', () => {
+  const { output, cleanup } = convertGuardJs(`
+function f(b, src) { Object.assign(b, src); return b; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(b: object, src: unknown\)/);
+    assert.doesNotMatch(output, /b: \{ x/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('property-path alias folds writes into the nested object shape (v0.1.47)', () => {
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { let a = b.c; a.d = 1; a.e = 's'; return b; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(b: \{ c: \{ d: number; e: string; \}; \}\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('property-path alias with a method call does not reshape the target (v0.1.47)', () => {
+  // A known-protocol object (style.setProperty) is not being built up by
+  // writes, so `style.display = 'none'` must not reshape `b.style`.
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { let a = b.style; a.set('x'); a.d = 'none'; return b; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(b: \{ style: unknown; \}\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('closure-return alias folds writes through the returned value (v0.1.47)', () => {
+  const fn = convertGuardJs(`
+function f(b) { function g() { return b; } const x = g(); x.a = 1; return b; }
+module.exports = f;
+`);
+  const arrow = convertGuardJs(`
+function h(b) { const g = () => b; const x = g(); x.a = 1; return b; }
+module.exports = h;
+`);
+  try {
+    assert.match(fn.output, /function f\(b: \{ a: number; \}\)/);
+    assert.match(arrow.output, /function h\(b: \{ a: number; \}\)/);
+  } finally {
+    fn.cleanup(); arrow.cleanup();
+  }
+});
+
+test('closure-return alias needs a trivial single-return function (v0.1.47)', () => {
+  // g has two returns (one of them null), so its result is not necessarily b.
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { function g(c) { if (c) return b; return null; } const x = g(1); x.a = 1; return b; }
+module.exports = f;
+`);
+  try {
+    assert.doesNotMatch(output, /function f\(b: \{ a: number; \}\)/);
+  } finally {
+    cleanup();
+  }
+});

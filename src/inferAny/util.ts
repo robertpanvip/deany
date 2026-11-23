@@ -293,6 +293,15 @@ export function isArrayIsArrayCall(call: ts.CallExpression): boolean {
   );
 }
 
+/** True for an `Object.assign(...)` call (the global, via property access). */
+export function isObjectAssignCall(call: ts.CallExpression): boolean {
+  return (
+    ts.isPropertyAccessExpression(call.expression) &&
+    call.expression.expression.getText(call.getSourceFile()) === 'Object' &&
+    call.expression.name.text === 'assign'
+  );
+}
+
 /**
  * TypeChecker prints a CommonJS `require('x')` initializer's module namespace
  * type using the *local binding name*, e.g. `var util = require('util')` prints
