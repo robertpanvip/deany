@@ -1,12 +1,12 @@
 import * as ts from 'typescript';
 
-import type { Evidence, InferenceContext } from './types.js';
+import type { Evidence, InferenceContext, ShapeNode } from './types.js';
 import { controlFlowNarrowedType } from './controlFlow.js';
 import { addConstraint, addSource, addWeakSource, emptyEvidence } from './state.js';
 import { declaredTypeOf, isExportedParameter } from './publicApi.js';
 import { ARRAY_BUILTIN_MEMBERS, BITWISE_OPERATORS, BUILTIN_METHOD_RETURN, INDEXABLE_OBJECT, ITERATION_METHODS, MEMBERLESS_OBJECT_SOURCES, NUMERIC_COERCION_OPERATORS, REDUCER_METHODS, REDUCER_SIGNATURE, RELATIONAL_OPERATORS, VAGUE_RETURN_TYPES, functionNameSuggestsReturnType, nameSuggestsNumber, variableNameSuggestsType } from './constants.js';
 import { arrayElementTypeOf, functionLikeName, isArrayIsArrayCall, isArrayTypeString, isFunctionLike, isSelfReferentialType, isUnderArrayIsArrayGuard, iterableArgumentConstraint, iterableConstructorConstraint, mergeMutationEvidence, objectArgumentIndices, requireModuleType, symbolOf, typeofLiteralToType, widenedTypeText } from './util.js';
-import { callResultShape, customArrayMethodSignature, insertShapeChain, mergeEvidence, propertyChainsWithCallsOf, renderShapeNode } from './shape.js';
+import { callResultShape, customArrayMethodSignature, insertShapeChain, isPlainObjectShapeText, mergeEvidence, propertyChainsWithCallsOf, renderShapeNode } from './shape.js';
 import { arithmeticNumberType, instanceTypeOf, noteDependency, orderableOperandType, symbolTypeText, typePredicateOfArgument, typeText } from './typeText.js';
 import { collectMutationEvidence, containerInstantiationFromMutations } from './mutation.js';
 import { callsOf, isPureAliasBinding, referencesOf } from './collect.js';
@@ -439,6 +439,14 @@ export function constraintsFromReference(
         // assignment sources on their normal union semantics. (v0.1.45.)
         if (isPureAliasBinding(parent, ctx)) {
           evidence.aliasSources.push(aliasType);
+          // The alias's own `a.<chain> = value` writes describe this same
+          // object. Feed them in as additional alias sources so a deep/shallow
+          // write through `a` merges field-wise with the target's own shape
+          // instead of being lost when `a`'s shapeChain is masked by its
+          // initializer source. (v0.1.46.)
+          for (const writeShape of aliasWriteShapes(parent, ctx)) {
+            evidence.aliasSources.push(writeShape);
+          }
         }
       }
     }
@@ -1415,6 +1423,78 @@ function isTypeClassifierParameter(owner: ts.Node, ctx: InferenceContext): boole
   };
   visit(fn.body);
   return !valueUse && categories.size >= 2;
+}
+
+/**
+ * Object shapes written *through* a pure alias binding. When `let a = b` and
+ * `a` is never reassigned, every `a.<chain> = value` write is really a write to
+ * `b` — the two names denote the same object. These writes may be sitting in
+ * `a`'s `shapeChain`, which `mergeEvidence` ignores whenever `a` already has a
+ * covariant `source` (e.g. its initializer `b`), so they would never reach `b`
+ * via `typeText(a)` alone. Rendering them into plain object shapes lets the
+ * alias-source merge in `mergeEvidence` combine them with `b`'s own evidence.
+ *
+ * Only genuine `=` writes with a concrete RHS are collected; reads, method
+ * calls and compound assignments are not shape evidence. Returns an empty
+ * array when there is nothing usable, so the caller adds no source. (v0.1.46.)
+ */
+function aliasWriteShapes(decl: ts.VariableDeclaration, ctx: InferenceContext): string[] {
+  if (!ts.isIdentifier(decl.name)) {
+    return [];
+  }
+  const symbol = ctx.checker.getSymbolAtLocation(decl.name);
+  if (symbol === undefined) {
+    return [];
+  }
+  const root: ShapeNode = { children: new Map<string, ShapeNode>() };
+  let sawWrite = false;
+  for (const ref of referencesOf(symbol, ctx)) {
+    // Walk outward to the longest property-access chain rooted at `ref`.
+    let current: ts.Expression = ref;
+    while (
+      ts.isPropertyAccessExpression(current.parent) &&
+      current.parent.expression === current
+    ) {
+      current = current.parent;
+    }
+    if (current === ref) {
+      continue;
+    }
+    const parent: ts.Node | undefined = current.parent;
+    if (
+      parent === undefined ||
+      !ts.isBinaryExpression(parent) ||
+      parent.left !== current ||
+      parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken
+    ) {
+      continue;
+    }
+    const chain: string[] = [];
+    let walk: ts.Expression = current;
+    while (ts.isPropertyAccessExpression(walk)) {
+      chain.unshift(walk.name.text);
+      walk = walk.expression;
+    }
+    // Only deep writes (`a.c.d = v`, chain length >= 2) are collected. A
+    // shallow alias write (`node.flag = v`) is already represented by the
+    // alias's own `properties` and folding it here widens function-parameter
+    // unions in real libraries (react-dom). The mixed deep-write scenario is
+    // the gap v0.1.45 left open. (v0.1.46.)
+    if (walk !== ref || chain.length < 2) {
+      continue;
+    }
+    const rhsType = typeText(ctx, parent.right);
+    if (rhsType === undefined || VAGUE_RETURN_TYPES.has(rhsType)) {
+      continue;
+    }
+    insertShapeChain(root, chain, false, false, rhsType);
+    sawWrite = true;
+  }
+  if (!sawWrite) {
+    return [];
+  }
+  const rendered = renderShapeNode(root);
+  return isPlainObjectShapeText(rendered) ? [rendered] : [];
 }
 
 export function collectEvidence(owner: ts.Node, ctx: InferenceContext, depth = 0): Evidence {

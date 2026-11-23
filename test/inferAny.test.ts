@@ -2501,6 +2501,52 @@ module.exports = f;
   }
 });
 
+test('mixed alias write and owner write merge into one maximal shape (v0.1.46)', () => {
+  // The owner is written directly (`b.x`) and through a pure alias (`a.c.d`).
+  // Both denote the same object, so the deep alias write must merge field-wise
+  // with the owner's own shape instead of being masked by the alias's source.
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { let a = b; b.x = 1; a.c.d = 123; return b; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(b: \{ c: \{ d: number; \}; x: number; \}\)/);
+    assert.doesNotMatch(output, /\{ x: number; \} \| \{ c:/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('shallow alias write alone does not merge into an owner that has a source (v0.1.46)', () => {
+  // A shallow alias write (`a.y`) is already carried by the alias's own
+  // `properties`; folding it into the owner's sources widened real-library
+  // parameter unions (react-dom). Only deep writes are collected, so this
+  // shallow case keeps its prior behaviour rather than merging.
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { let a = b; b.x = 1; a.y = 's'; return b; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(b: \{ x: number; \}\)/);
+    assert.doesNotMatch(output, /y: string/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('reassigned alias writes do not merge into the owner (v0.1.46)', () => {
+  // `a` is reassigned, so a write through it is not evidence about `b`.
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { let a = b; a = { q: 1 }; b.x = 1; a.c.d = 123; return b; }
+module.exports = f;
+`);
+  try {
+    assert.doesNotMatch(output, /c: \{ d: number; \}/);
+  } finally {
+    cleanup();
+  }
+});
+
 test('array destructuring folds binding element shapes into the element type (v0.1.44)', () => {
   // `const [a, b] = arr; a.x = 1` — the binding elements are the container's
   // elements, so their dereferenced shape refines the opaque Iterable element.
