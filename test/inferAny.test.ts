@@ -11,7 +11,7 @@ import { buildInferenceTable } from '../src/inferAny/table.js';
 import { createContext, createTable, emptyEvidence, MAX_FIXED_POINT_ROUNDS } from '../src/inferAny/state.js';
 import { collectAnyOwners } from '../src/inferAny/collect.js';
 import { collectDeclarations } from '../src/inferAny/collect.js';
-import { collectEvidence } from '../src/inferAny/evidence.js';
+import { collectEvidence } from '../src/inferAny/evidence/index.js';
 import { mergeEvidence } from '../src/inferAny/shape.js';
 import { variableNameSuggestsType } from '../src/inferAny/constants.js';
 import { splitTopLevelUnion } from '../src/inferAny/util.js';

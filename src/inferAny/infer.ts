@@ -12,7 +12,7 @@ import { isCatchClauseVariable, mergeMutationEvidence, ownerOf, parenthesizeIfCo
 import { recordValueSlotType, specialSlotType, structuredSlotType } from './slot.js';
 import { collectMutationEvidence, mutationKindOf } from './mutation.js';
 import { mergeEvidence } from './shape.js';
-import { collectEvidence } from './evidence.js';
+import { collectEvidence } from './evidence/index.js';
 
 /**
  * Infer concrete types for explicit `any` annotations in a TypeScript program.

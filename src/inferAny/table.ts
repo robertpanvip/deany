@@ -4,7 +4,7 @@ import type { InferenceContext, InferenceTable } from './types.js';
 import { MAX_FIXED_POINT_ROUNDS } from './state.js';
 import { isFunctionLike } from './util.js';
 import { mergeEvidence } from './shape.js';
-import { collectEvidence } from './evidence.js';
+import { collectEvidence } from './evidence/index.js';
 
 /** Store an owner's inferred type into the correct side of the table. */
 export function setOwnerType(table: InferenceTable, owner: ts.Node, type: string): void {
