@@ -2458,3 +2458,39 @@ module.exports = f;
     cleanup();
   }
 });
+
+test('array destructuring folds binding element shapes into the element type (v0.1.44)', () => {
+  // `const [a, b] = arr; a.x = 1` — the binding elements are the container's
+  // elements, so their dereferenced shape refines the opaque Iterable element.
+  const { output, cleanup } = convertGuardJs(`
+function f(arr) { const [a, b] = arr; a.x = 1; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(arr: Iterable<\{ x: unknown; \}>\)/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('object rest destructuring does not fabricate a source property named rest (v0.1.44)', () => {
+  // `const { a, ...rest } = opts` captures the remaining keys; it does NOT
+  // require opts to carry a property literally named `rest`. Assert the
+  // old bug (opts.rest: unknown) is gone across rest forms.
+  const { output: withA, cleanup } = convertGuardJs(`
+function f(opts) { const { a, ...rest } = opts; return rest; }
+module.exports = f;
+`);
+  const { output: onlyRest, cleanup: c2 } = convertGuardJs(`
+function g(opts) { const { ...rest } = opts; return rest; }
+module.exports = g;
+`);
+  try {
+    assert.match(withA, /function f\(opts: \{ a: unknown; \}\)/);
+    assert.doesNotMatch(withA, /rest: unknown/);
+    assert.match(onlyRest, /function g\(opts: unknown\)/);
+    assert.doesNotMatch(onlyRest, /rest: unknown/);
+  } finally {
+    cleanup(); c2();
+  }
+});

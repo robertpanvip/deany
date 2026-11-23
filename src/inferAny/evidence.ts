@@ -1114,6 +1114,34 @@ export function constraintsFromReference(
     // Array destructuring requires an Iterable, not an Array (a Set or a
     // generator can be destructured too). Use the protocol, not the concrete.
     addConstraint(evidence, 'Iterable<unknown>');
+    // Element alias: `const [a, b] = xs` binds a/b to the container's elements,
+    // so property chains dereferenced on those bindings are covariant evidence
+    // for the element type. Scan the enclosing block for each binding's usage
+    // (the same structural approach as for-of) and fold the chains into
+    // elementShape, so mergeEvidence refines `Iterable<unknown>` to
+    // `Iterable<shape>`. (v0.1.44.)
+    let scope: ts.Node = parent;
+    while (
+      scope.parent !== undefined &&
+      !ts.isBlock(scope.parent) &&
+      !ts.isSourceFile(scope.parent) &&
+      !ts.isFunctionLike(scope.parent)
+    ) {
+      scope = scope.parent;
+    }
+    const scanBody = scope.parent ?? scope;
+    for (const element of parent.name.elements) {
+      if (
+        !ts.isBindingElement(element) ||
+        element.dotDotDotToken !== undefined ||
+        !ts.isIdentifier(element.name)
+      ) {
+        continue;
+      }
+      for (const { keys, callable } of propertyChainsWithCallsOf(element.name, scanBody, ctx)) {
+        insertShapeChain(evidence.elementShape, keys, callable);
+      }
+    }
   }
   if (
     ts.isVariableDeclaration(parent) &&
@@ -1121,6 +1149,14 @@ export function constraintsFromReference(
     ts.isObjectBindingPattern(parent.name)
   ) {
     for (const element of parent.name.elements) {
+      // A rest element (`const { a, ...rest } = opts`) captures the *remaining*
+      // keys — it is NOT a property named `rest` on the source. Recording it as
+      // `opts.rest` is a correctness bug: it forces every source object to
+      // carry a `rest` member it never had. Skip it; the rest binding's own
+      // shape is inferred independently as a normal owner. (v0.1.44.)
+      if (element.dotDotDotToken !== undefined) {
+        continue;
+      }
       const keyNode = element.propertyName ?? element.name;
       if (ts.isIdentifier(keyNode) || ts.isStringLiteral(keyNode) || ts.isNumericLiteral(keyNode)) {
         const key = keyNode.text;
