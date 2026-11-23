@@ -6,11 +6,19 @@ import { BUILTIN_MEMBERS_BY_SOURCE, BUILTIN_MEMBER_CHAIN_LEAF_TYPES, INDEXABLE_O
 import { addStringIndexSignature, isArrayTypeString, splitTopLevelUnion } from './util.js';
 import { uniqueBuiltinReceiverType } from './typeText.js';
 
+/** Union two leaf type texts, de-duplicating top-level union members. */
+function unionLeafType(existing: string, added: string): string {
+  if (existing === added) return existing;
+  const parts = [...new Set([...splitTopLevelUnion(existing), ...splitTopLevelUnion(added)])];
+  return parts.sort().join(' | ');
+}
+
 export function insertShapeChain(
   root: ShapeNode,
   chain: readonly string[],
   callable = false,
   optional = false,
+  writeLeafType?: string,
 ): void {
   let node = root;
   for (const key of chain) {
@@ -47,6 +55,14 @@ export function insertShapeChain(
     const leafType = BUILTIN_MEMBER_CHAIN_LEAF_TYPES.get(chain.join('.'));
     if (leafType !== undefined && node.children.size === 0 && !callable) {
       node.leafType = leafType;
+    }
+    // A value written through a deep chain (`a.c.d = 123`) fixes the terminal
+    // leaf's type (number), not just its existence. A later, different write
+    // widens it to a union rather than overwriting. Writes are real covariant
+    // evidence so this outranks the opaque `unknown` default. (v0.1.43.)
+    if (writeLeafType !== undefined && node.children.size === 0 && !callable) {
+      node.leafType =
+        node.leafType === undefined ? writeLeafType : unionLeafType(node.leafType, writeLeafType);
     }
   }
 }

@@ -2394,3 +2394,67 @@ module.exports = { pick, scheduleTimeout };
     cleanup();
   }
 });
+
+test('pure alias assignment flows shape writes back to the source binding (v0.1.43)', () => {
+  // `let a = b; a.c.d = 123` — a and b denote the same object, so the shape
+  // written through a is also b's shape. The reverse edge feeds a's inferred
+  // type into b with a dependency, so the fixed point re-evaluates b after a
+  // settles instead of freezing b at a premature `unknown`. The deep write's
+  // RHS type is recorded on the leaf (d: number, not unknown).
+  const { output: fnOut, file, cleanup } = convertGuardJs(`
+function f(b) { let a = b; a.c.d = 123; }
+module.exports = f;
+`);
+  const { output: constOut, cleanup: c2 } = convertGuardJs(`
+function g(b) { const a = b; a.c.d = 123; }
+module.exports = g;
+`);
+  const { output: chainOut, cleanup: c3 } = convertGuardJs(`
+function h(b) { let a = b; let c = a; c.c.d = 123; }
+module.exports = h;
+`);
+  try {
+    assert.match(fnOut, /function f\(b: \{ c: \{ d: number; \}; \}\): void/);
+    assert.match(constOut, /function g\(b: \{ c: \{ d: number; \}; \}\): void/);
+    // Two-level alias chain propagates all the way back to b.
+    assert.match(chainOut, /function h\(b: \{ c: \{ d: number; \}; \}\): void/);
+    const strict = checkStrict(file, fnOut, { allowJs: true });
+    assert.ok(strict.ok, strict.diagnostics.join('\n'));
+  } finally {
+    cleanup(); c2(); c3();
+  }
+});
+
+test('alias rule only applies to a bare identifier initializer, not expressions or annotations (v0.1.43)', () => {
+  // `let a = b + 1` is not an alias: b must not inherit a's shape, and b keeps
+  // its numeric coercion source. Likewise an annotated `let a: T = b` is a
+  // contract, not an alias edge.
+  const { output: exprOut, cleanup: c1 } = convertGuardJs(`
+function f(b) { let a = b + 1; a.c.d = 123; }
+module.exports = f;
+`);
+  const { output: directOut, cleanup: c2 } = convertGuardJs(`
+function g(b) { b.c.d = 123; }
+module.exports = g;
+`);
+  try {
+    assert.match(exprOut, /function f\(b: number\): void/);
+    assert.doesNotMatch(exprOut, /b: \{ c/);
+    // A direct deep write (no alias) also records the leaf's RHS type.
+    assert.match(directOut, /function g\(b: \{ c: \{ d: number; \}; \}\): void/);
+  } finally {
+    c1(); c2();
+  }
+});
+
+test('multiple writes through an alias widen the leaf to a union (v0.1.43)', () => {
+  const { output, cleanup } = convertGuardJs(`
+function f(b) { let a = b; a.c.d = 123; a.c.d = 'x'; }
+module.exports = f;
+`);
+  try {
+    assert.match(output, /function f\(b: \{ c: \{ d: number \| string; \}; \}\): void/);
+  } finally {
+    cleanup();
+  }
+});

@@ -412,6 +412,31 @@ export function constraintsFromReference(
     }
   }
 
+  // Pure alias: `let a = b` / `const a = b` where this binding (`b`) is the
+  // initializer and `a` is a plain identifier with no type annotation. The two
+  // names denote the same object, so any shape written through `a` is also the
+  // shape of `b` (`let a = b; a.c.d = 1` must narrow b too). Feed `a`'s inferred
+  // type back into this binding as a covariant source, with a dependency edge
+  // so the fixed point re-evaluates b after a settles — otherwise a strong
+  // early `b: unknown` freezes before a's shape is known. Only bare-identifier
+  // initializers qualify: `let a = f(b)` / `let a = b + 1` are not aliases, and
+  // an annotated `let a: T = b` is a contract, not an alias. (v0.1.43.)
+  if (
+    ts.isVariableDeclaration(parent) &&
+    parent.initializer === useNode &&
+    ts.isIdentifier(parent.name) &&
+    parent.type === undefined
+  ) {
+    const aliasDeclaration = ctx.checker.getSymbolAtLocation(parent.name)?.valueDeclaration;
+    if (aliasDeclaration !== undefined && aliasDeclaration !== ctx.activeOwner) {
+      noteDependency(ctx, aliasDeclaration);
+      const aliasType = typeText(ctx, parent.name);
+      if (aliasType !== undefined && !VAGUE_RETURN_TYPES.has(aliasType)) {
+        addSource(evidence, aliasType);
+      }
+    }
+  }
+
   // Logical assignment (`x ||= v`, `x &&= v`, `x ??= v`): v is a value the
   // binding receives, so it is a covariant source, just like `x = v`.
   if (
@@ -460,7 +485,23 @@ export function constraintsFromReference(
         current = current.expression;
       }
       if (current === useNode) {
-        insertShapeChain(evidence.shapeChain, chain);
+        // A deep write (`a.c.d = 123`): the RHS is real value evidence for the
+        // terminal leaf, so record its type on the chain instead of leaving an
+        // opaque `unknown`. Skipped for compound/logical assignments and for
+        // writes of an opaque value. (v0.1.43.)
+        let writeLeafType: string | undefined;
+        const outerParent = outermost.parent;
+        if (
+          ts.isBinaryExpression(outerParent) &&
+          outerParent.left === outermost &&
+          outerParent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        ) {
+          const rhsType = typeText(ctx, outerParent.right);
+          if (rhsType !== undefined && !VAGUE_RETURN_TYPES.has(rhsType)) {
+            writeLeafType = rhsType;
+          }
+        }
+        insertShapeChain(evidence.shapeChain, chain, false, false, writeLeafType);
       }
     }
 
