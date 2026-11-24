@@ -247,7 +247,16 @@ export function mergeObjectShapeWithProperties(
   for (const field of splitTopLevelFields(body)) {
     const colon = field.indexOf(':');
     if (colon >= 0) {
-      const name = field.slice(0, colon).trim().replace(/^['"]|['"]$/g, '');
+      let name = field.slice(0, colon).trim().replace(/^['"]|['"]$/g, '');
+      // An already-synthesized shape carries optional fields as `name?: T`.
+      // Strip the `?` so the name matches the property map's plain key;
+      // otherwise every fixed-point round re-appends the same field (its text
+      // differing only by `| undefined` / optionality) and the shape explodes
+      // (e.g. p-map's `options` grew 255 duplicate `concurrency?` fields).
+      // (Shape-accumulation fix.)
+      if (name.endsWith('?')) {
+        name = name.slice(0, -1).trim();
+      }
       if (name.length > 0) {
         existing.add(name);
       }

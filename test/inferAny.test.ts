@@ -2663,3 +2663,37 @@ module.exports = f;
     cleanup();
   }
 });
+
+test('destructured param passed through a call site does not accumulate duplicate fields (fixed point)', () => {
+  // Regression: a destructured `options` parameter with a `= {}` initializer,
+  // passed unchanged through a wrapper call, used to feed its own previous
+  // inference result back as a source every round. Because optional field keys
+  // kept their `?` when matched against the property map, `concurrency?` was
+  // re-appended each round (1->3->6->10...) until the type hit 49K chars and
+  // produced 2336 TS2300 duplicate-identifier errors (p-map). The shape must
+  // now converge with each field appearing exactly once.
+  const { output } = infer(`
+function pMap(iterable: any, mapper: any, options: any) {
+  return mapConcurrently(iterable, mapper, options, false);
+}
+async function mapConcurrently(iterable: any, mapper: any,
+  { concurrency = Infinity, stopOnError = true, signal }: any = {}, isSettled: any) {
+  validateOptions(iterable, mapper, concurrency);
+  const listener = () => reject(signal.reason);
+  signal?.removeEventListener('abort', listener);
+  if (signal?.aborted) reject(signal.reason);
+  signal.addEventListener('abort', listener, { once: true });
+  if (!stopOnError) {}
+  for (let i = 0; i < concurrency; i++) {}
+}
+function validateOptions(a: any, b: any, c: any) {}
+function reject(x: any) {}
+`);
+  const concurrencyFields = (output.match(/concurrency\?/g) ?? []).length;
+  assert.ok(concurrencyFields <= 2, `expected <=2 concurrency? fields, got ${concurrencyFields}`);
+  assert.ok(output.length < 3000, `output should stay compact, got ${output.length} chars`);
+  const line = output.split('\n').find((l) => l.includes('concurrency?'));
+  if (line !== undefined) {
+    assert.ok(line.length < 600, `options type line should stay short, got ${line.length} chars`);
+  }
+});
